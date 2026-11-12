@@ -66,6 +66,7 @@ class AppConstants {
   static const String keyServerAllowNetwork = 'server_allow_network';
   static const String keyClusterEnabled = 'cluster_enabled';
   static const String keyClusterWorkers = 'cluster_workers';
+  static const String keyClusterGpuSelection = 'cluster_gpu_selection';
   static const String keyImageSteps = 'image_steps';
   static const String keyImageGenForceCpu = 'image_gen_force_cpu';
   static const String keyImageGenBackend = 'image_gen_backend';
@@ -378,6 +379,81 @@ class AppConstants {
       'size': '2.0 GB',
       'description': 'Photorealistic general-purpose image generation',
       'template': 'sd',
+    },
+    {
+      'name': 'Qwen-Image 2.1 Turbo Uncensored (Q4)',
+      'filename': 'Qwen-Image-2.1-Turbo-Uncensored-AD-Q4_K.gguf',
+      'url':
+          'https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF/resolve/main/Qwen-Image-2.1-Turbo-Uncensored-AD-Q4_K.gguf',
+      'size': 'about 7 GB',
+      'description':
+          'Uncensored Qwen image model in GGUF format; requires a desktop-class device',
+      'template': 'chatml',
+      'recommended': 'uncensored,image',
+    },
+    {
+      'name': 'MiniMax H3 Image (Q4_K_M)',
+      'filename': 'MiniMax-H3-Image-Pruned-Q4_K_M.gguf',
+      'url':
+          'https://huggingface.co/Abiray/MiniMax-H3-Image-GGUF/resolve/main/MiniMax-H3-Image-Pruned-Q4_K_M.gguf',
+      'size': 'about 8 GB',
+      'description':
+          'MiniMax H3 image model, quantized for local GGUF inference',
+      'template': 'chatml',
+      'recommended': 'image',
+    },
+    {
+      'name': 'Ideogram 4 (Q4)',
+      'filename': 'ideogram4-Q4_0.gguf',
+      'url':
+          'https://huggingface.co/leejet/ideogram-4-GGUF/resolve/main/ideogram4-Q4_0.gguf',
+      'size': 'about 10 GB',
+      'description': 'Ideogram 4 local GGUF image model',
+      'template': 'chatml',
+      'recommended': 'image',
+    },
+    {
+      'name': 'Ternary Bonsai 2 27B (Q2)',
+      'filename': 'Ternary-Bonsai-2-27B-Q2_0.gguf',
+      'url':
+          'https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/Ternary-Bonsai-2-27B-Q2_0.gguf',
+      'size': 'about 10 GB',
+      'description':
+          'Ternary Bonsai 2 27B; a strong candidate for Phone cluster loading',
+      'template': 'chatml',
+      'recommended': 'general,uncensored',
+    },
+    {
+      'name': 'Qwen3.8 27B Heretic (Q4_K_M)',
+      'filename': 'Qwen3.8-27B-Heretic-Q4_K_M.gguf',
+      'url':
+          'https://huggingface.co/0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF/resolve/main/Qwen3.8-27B-Heretic-Q4_K_M.gguf',
+      'size': 'about 16 GB',
+      'description':
+          'Abliterated Qwen3.8 27B GGUF; intended for a desktop or Phone cluster',
+      'template': 'chatml',
+      'recommended': 'uncensored',
+    },
+    {
+      'name': 'Flint Abliterated Mix (12G)',
+      'filename': 'Flint-abliterated-Mix-12G.gguf',
+      'url':
+          'https://huggingface.co/orcarouter/Flint-abliterated-GGUF/resolve/main/Flint-abliterated-Mix-12G.gguf',
+      'size': 'about 12 GB',
+      'description': 'Abliterated Flint mixture for local GGUF inference',
+      'template': 'chatml',
+      'recommended': 'uncensored',
+    },
+    {
+      'name': 'DeepSeek V4.1 Flash (IQ2 XS, sharded)',
+      'filename': 'DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00001-of-00004.gguf',
+      'url':
+          'https://huggingface.co/AtomicChat/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-GGUF/resolve/main/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00001-of-00004.gguf',
+      'size': 'multi-file, about 20 GB total',
+      'description':
+          'DeepSeek V4.1 Flash shard 1; all four shards must be imported before loading',
+      'template': 'chatml',
+      'recommended': 'uncensored',
     },
     {
       'name': 'AnyLoRA (SD 1.5)',

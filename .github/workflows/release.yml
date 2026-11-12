@@ -1,0 +1,136 @@
+name: Build and publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish (for manual runs)
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.35.7'
+
+jobs:
+  android:
+    name: Android APK and App Bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install Android SDK components
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and shader compiler
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" \
+            "ndk;27.0.12077973" "cmake;3.22.1"
+          sudo apt-get update
+          sudo apt-get install -y glslc
+
+      - name: Build Android packages
+        run: |
+          flutter config --jdk-dir "$JAVA_HOME"
+          flutter pub get
+          flutter build apk --release
+          flutter build appbundle --release
+
+      - name: Upload Android packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-packages
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+
+  linux:
+    name: Linux desktop bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install Linux and Vulkan dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev libblkid-dev liblzma-dev \
+            libvulkan-dev vulkan-tools spirv-headers spirv-tools shaderc
+
+      - name: Build Linux bundle
+        run: |
+          flutter pub get
+          flutter build linux --release
+          tar -C build/linux/x64/release -czf privatelm-linux-x64.tar.gz bundle
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-package
+          path: privatelm-linux-x64.tar.gz
+
+  publish:
+    name: Publish GitHub release
+    needs: [android, linux]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    steps:
+      - name: Download Android packages
+        uses: actions/download-artifact@v4
+        with:
+          name: android-packages
+          path: release
+
+      - name: Download Linux package
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-package
+          path: release
+
+      - name: Normalize release filenames
+        run: |
+          mv release/flutter-apk/app-release.apk release/app-release.apk
+          mv release/bundle/release/app-release.aab release/app-release.aab
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release/app-release.apk
+            release/app-release.aab
+            release/privatelm-linux-x64.tar.gz

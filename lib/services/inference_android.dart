@@ -5,8 +5,11 @@ import 'package:path_provider/path_provider.dart';
 import 'package:flutter_litert_lm/flutter_litert_lm.dart';
 import 'package:llama_flutter_android/llama_flutter_android.dart';
 
+import 'inference_linux_engine.dart';
+
 /// Whether the current platform supports local inference.
-bool get supportsLocalInference => Platform.isAndroid || Platform.isIOS;
+bool get supportsLocalInference =>
+    Platform.isAndroid || Platform.isIOS || Platform.isLinux;
 
 /// True when the app runs as a 32-bit process (32-bit Android, e.g. Android
 /// Go phones). LiteRT ships 64-bit only, and the address space limits model
@@ -37,6 +40,9 @@ class LoadResult {
 /// Android & iOS inference engine — wraps llama_flutter_android.
 class InferenceEngine {
   LlamaController? _controller;
+  // Linux desktop: local GGUF via libplm_bridge.so instead of the
+  // llama_flutter_android method channel.
+  final LinuxLlamaEngine? _linux = Platform.isLinux ? LinuxLlamaEngine() : null;
   LiteLmEngine? _liteEngine;
   LiteLmConversation? _liteConversation;
   StreamSubscription? _subscription;
@@ -46,7 +52,8 @@ class InferenceEngine {
   bool _isLiteRt = false;
   // GGUF model loaded together with a working vision projector.
   bool _ggufVisionLoaded = false;
-  bool get ggufVisionLoaded => _ggufVisionLoaded;
+  bool get ggufVisionLoaded =>
+      Platform.isLinux ? false : _ggufVisionLoaded;
   bool _disposed = false;
   bool _hasLoadedModel = false;
   String? _liteConversationSystemPrompt;
@@ -73,6 +80,13 @@ class InferenceEngine {
     _disposed = false;
     final runtime = _runtimeFor(modelPath, modelRuntime);
     if (runtime == 'litert') {
+      if (Platform.isLinux) {
+        return LoadResult(
+          success: false,
+          message:
+              'LiteRT-LM models are Android-only in this build. Use a GGUF model on Linux desktop.',
+        );
+      }
       return _loadLiteRtModel(
         modelPath,
         contextSize: contextSize,
@@ -80,6 +94,15 @@ class InferenceEngine {
         forceCpu: forceLiteRtCpu,
         clearCache: clearLiteRtCache,
         enableVision: enableLiteRtVision,
+        onProgress: onProgress,
+      );
+    }
+
+    if (Platform.isLinux) {
+      return _loadLinuxModel(
+        modelPath,
+        contextSize: contextSize,
+        mmprojPath: mmprojPath,
         onProgress: onProgress,
       );
     }
@@ -202,6 +225,56 @@ class InferenceEngine {
       gpuLayers: gpuLayers,
       runtime: 'llama',
       backend: gpuLayers > 0 ? 'gpu' : 'cpu',
+    );
+  }
+
+  /// Linux desktop GGUF load: bridge-based, CPU threads scaled to the host.
+  Future<LoadResult> _loadLinuxModel(
+    String modelPath, {
+    required int contextSize,
+    String? mmprojPath,
+    void Function(double)? onProgress,
+  }) async {
+    final engine = _linux!;
+    _isLiteRt = false;
+    _ggufVisionLoaded = false;
+
+    // The bridge process-level singleton can still hold a stale model.
+    try {
+      if (await Future(() => PlmBridge.isLoaded() == 1)) {
+        print('[Inference] Freeing a stale native model before loading');
+        await engine.dispose();
+      }
+    } catch (_) {}
+
+    // CPU threads: half the cores, capped to a sane range.
+    final cores = Platform.numberOfProcessors;
+    final threads = cores <= 8 ? cores : (cores ~/ 2).clamp(4, 12);
+
+    if (mmprojPath != null) {
+      print('[Inference] Linux bridge is text-only — mmproj ignored');
+    }
+
+    final error = await engine.loadModel(
+      modelPath: modelPath,
+      mmprojPath: null,
+      threads: threads,
+      contextSize: contextSize,
+      gpuLayers: 0,
+    );
+    if (error != null) {
+      return LoadResult(success: false, message: error);
+    }
+
+    print(
+        '[Inference] ✓ Model loaded: CPU ($threads threads), ctx=$contextSize');
+    return LoadResult(
+      success: true,
+      message: 'Model loaded (CPU, $threads threads).',
+      gpuName: '',
+      gpuLayers: 0,
+      runtime: 'llama',
+      backend: 'cpu',
     );
   }
 
@@ -346,6 +419,18 @@ class InferenceEngine {
     String source = 'chat',
     void Function(String token)? onToken,
   }) async {
+    if (Platform.isLinux) {
+      return _generateLinux(
+        prompt: prompt,
+        conversationHistory: conversationHistory,
+        systemPrompt: systemPrompt,
+        maxTokens: maxTokens,
+        temperature: temperature,
+        imagePath: imagePath,
+        source: source,
+        onToken: onToken,
+      );
+    }
     if (_isLiteRt) {
       return _generateLiteRt(
         prompt: prompt,
@@ -474,6 +559,108 @@ class InferenceEngine {
     });
 
     // Hard timeout
+    Future.delayed(_hardTimeout(maxTokens, minSeconds: 180), () {
+      if (!completed) {
+        final partial = buffer.toString();
+        finish(partial.isEmpty
+            ? 'ERROR: Generation timed out.'
+            : '$partial$_timeLimitNote');
+      }
+    });
+
+    return await completer.future;
+  }
+
+  /// Linux desktop generation: full history through the bridge's chat
+  /// template, streamed token pieces, same timeouts as the phone builds.
+  Future<String> _generateLinux({
+    required String prompt,
+    List<Map<String, String>>? conversationHistory,
+    required String systemPrompt,
+    required int maxTokens,
+    required double temperature,
+    String? imagePath,
+    required String source,
+    void Function(String token)? onToken,
+  }) async {
+    final engine = _linux;
+    if (engine == null || !engine.isModelLoaded) {
+      throw Exception('No model loaded');
+    }
+    if (imagePath != null && imagePath.isNotEmpty) {
+      return 'Vision is not available on Linux desktop yet. Use a text-only prompt.';
+    }
+
+    final completer = Completer<String>();
+    final buffer = StringBuffer();
+    bool completed = false;
+
+    void finish(String result, {bool stopNative = true}) {
+      if (!completed && !_disposed) {
+        completed = true;
+        _idleTimer?.cancel();
+        _subscription?.cancel();
+        _onStop = null;
+        if (stopNative) {
+          unawaited(engine.stop().catchError((_) {}));
+        }
+        if (!completer.isCompleted) completer.complete(result);
+      }
+    }
+
+    _onStop = () {
+      finish(buffer.toString());
+    };
+
+    final messages = _buildChatMessages(
+        prompt, conversationHistory, systemPrompt,
+        imagePath: null);
+    final stream = engine.generateChat(
+      messages: messages,
+      template: null,
+      maxTokens: maxTokens,
+      temperature: temperature,
+      topP: 0.9,
+      topK: 40,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      repeatLastN: 64,
+    );
+
+    int tokenCount = 0;
+    _subscription = stream.listen(
+      (token) {
+        if (tokenCount == 0) {
+          print('[Inference] ✓ FIRST TOKEN received! Prefill done.');
+        }
+        _idleTimer?.cancel();
+        _idleTimer = Timer(_tokenStallTimeout, () {
+          print('[Inference] Idle timeout — $tokenCount tokens');
+          finish(buffer.toString());
+        });
+        final clean = _sanitizeGemmaGarbage(token);
+        if (clean.isEmpty) return;
+        buffer.write(clean);
+        tokenCount++;
+        onToken?.call(clean);
+      },
+      onDone: () {
+        print('[Inference] Stream onDone — $tokenCount tokens total');
+        finish(buffer.toString(), stopNative: false);
+      },
+      onError: (error) {
+        print('[Inference] Stream error: $error');
+        finish('ERROR: Generation failed — $error');
+      },
+    );
+
+    _idleTimer = Timer(const Duration(seconds: 60), () {
+      if (tokenCount == 0) {
+        finish(
+            'ERROR: Model did not respond. Try a smaller model or shorter conversation.');
+      }
+    });
+
     Future.delayed(_hardTimeout(maxTokens, minSeconds: 180), () {
       if (!completed) {
         final partial = buffer.toString();
@@ -712,6 +899,12 @@ class InferenceEngine {
     _onStop = null;
     stopCallback?.call();
     unawaited(_subscription?.cancel() ?? Future<void>.value());
+    if (_linux != null) {
+      try {
+        await _linux.stop();
+      } catch (_) {}
+      return;
+    }
     if (_isLiteRt) {
       _liteConversationHasMessages = true;
       try {
@@ -742,6 +935,9 @@ class InferenceEngine {
   }
 
   Future<ContextInfo?> getContextInfo() async {
+    if (_linux != null) {
+      return _linux.getContextInfo();
+    }
     if (_isLiteRt) return null;
     try {
       return await _controller?.getContextInfo();
@@ -754,6 +950,12 @@ class InferenceEngine {
     if (_disposed) return;
     await stop();
     _disposed = true;
+    if (_linux != null) {
+      try {
+        await _linux.dispose();
+      } catch (_) {}
+      return;
+    }
     if (_hasLoadedModel) {
       try {
         await _controller?.dispose();

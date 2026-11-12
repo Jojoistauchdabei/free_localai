@@ -8,6 +8,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../core/ui.dart';
 import '../services/cluster_service.dart';
+import '../services/lan_model_share_service.dart';
 
 /// Phone cluster: pick Master (runs the model) or Worker (lends this phone),
 /// and pair them by scanning the worker's QR code.
@@ -55,18 +56,24 @@ class _ClusterViewState extends State<ClusterView> {
               items: [
                 (ClusterRole.off, 'Off'),
                 if (ClusterService.canBeMaster) (ClusterRole.master, 'Master'),
-                (ClusterRole.worker, 'Worker'),
+                if (ClusterService.canBeWorker) (ClusterRole.worker, 'Worker'),
               ],
               selected: role,
               onChanged: cluster.setRole,
             ),
             const SizedBox(height: 16),
-            if (role != ClusterRole.off && cluster.wifiAddress.value == null) ...[
+            if (role != ClusterRole.off &&
+                cluster.wifiAddress.value == null) ...[
               AppNotice(
                 'Turn on Wi-Fi. All phones in the cluster must be on the same Wi-Fi network.',
                 icon: Icons.wifi_off_rounded,
                 color: t.orange,
               ),
+              const SizedBox(height: 16),
+            ],
+            if (role != ClusterRole.off &&
+                Get.isRegistered<LanModelShareService>()) ...[
+              _lanModelsSection(context, Get.find<LanModelShareService>()),
               const SizedBox(height: 16),
             ],
             ...switch (role) {
@@ -108,9 +115,11 @@ class _ClusterViewState extends State<ClusterView> {
         const SizedBox(height: 12),
         Text('Worker stopped', style: t.bodyStrong),
         const SizedBox(height: 4),
-        Text(s.error ?? 'Unknown error', style: t.caption, textAlign: TextAlign.center),
+        Text(s.error ?? 'Unknown error',
+            style: t.caption, textAlign: TextAlign.center),
         const SizedBox(height: 16),
-        PillButton(label: 'Try again', primary: true, onPressed: cluster.startWorker),
+        PillButton(
+            label: 'Try again', primary: true, onPressed: cluster.startWorker),
       ]);
     } else if (s.peer != null) {
       body = _centered(context, [
@@ -123,14 +132,21 @@ class _ClusterViewState extends State<ClusterView> {
         Row(children: [
           Expanded(child: _Stat(label: 'Holding', value: _gb(s.heldMb))),
           Expanded(child: _Stat(label: 'Free at start', value: _gb(s.ramMb))),
-          Expanded(child: _Stat(label: 'Memory speed', value: '${s.bandwidth.toStringAsFixed(1)} GB/s')),
+          Expanded(
+              child: _Stat(
+                  label: 'Memory speed',
+                  value: '${s.bandwidth.toStringAsFixed(1)} GB/s')),
         ]),
       ]);
     } else if (!s.running || qr == null) {
       body = _centered(context, [
-        const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2.5)),
+        const SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(strokeWidth: 2.5)),
         const SizedBox(height: 16),
-        Text(s.running ? 'Waiting for Wi-Fi…' : 'Measuring this phone…', style: t.caption),
+        Text(s.running ? 'Waiting for Wi-Fi…' : 'Measuring this phone…',
+            style: t.caption),
       ]);
     } else {
       body = _centered(context, [
@@ -153,7 +169,10 @@ class _ClusterViewState extends State<ClusterView> {
         const SizedBox(height: 16),
         Row(children: [
           Expanded(child: _Stat(label: 'Free memory', value: _gb(s.ramMb))),
-          Expanded(child: _Stat(label: 'Memory speed', value: '${s.bandwidth.toStringAsFixed(1)} GB/s')),
+          Expanded(
+              child: _Stat(
+                  label: 'Memory speed',
+                  value: '${s.bandwidth.toStringAsFixed(1)} GB/s')),
         ]),
       ]);
     }
@@ -224,7 +243,8 @@ class _ClusterViewState extends State<ClusterView> {
               subtitle: [
                 w.endpoint,
                 if (w.ramMb != null) '${_gb(w.ramMb!)} free',
-                if (w.bandwidth != null) '${w.bandwidth!.toStringAsFixed(1)} GB/s',
+                if (w.bandwidth != null)
+                  '${w.bandwidth!.toStringAsFixed(1)} GB/s',
               ].join(' · '),
               trailing: IconButton(
                 icon: Icon(Icons.close_rounded, color: t.muted),
@@ -233,11 +253,72 @@ class _ClusterViewState extends State<ClusterView> {
               ),
             ),
         ]),
+      if (cluster.localGpuDevices.isNotEmpty) ...[
+        const SizedBox(height: 20),
+        SectionHeader('This PC: Vulkan devices'),
+        AppCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Each GPU is available separately. Auto mode chooses the '
+                'fastest device that can hold the model; select more devices '
+                'to distribute a larger model.',
+                style: t.caption,
+              ),
+              const SizedBox(height: 8),
+              Row(children: [
+                PillButton(
+                  label: 'Fastest only',
+                  icon: Icons.speed_rounded,
+                  onPressed: cluster.autoSelectLocalGpus,
+                ),
+                const SizedBox(width: 8),
+                PillButton(
+                  label: 'Use all',
+                  icon: Icons.select_all_rounded,
+                  onPressed: cluster.selectAllLocalGpus,
+                ),
+              ]),
+              const SizedBox(height: 4),
+              for (final gpu in cluster.localGpuDevices)
+                CheckboxListTile(
+                  value: gpu.selected,
+                  onChanged: (value) =>
+                      cluster.setLocalGpuSelected(gpu.index, value ?? false),
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.memory_rounded),
+                  title: Text(gpu.name),
+                  subtitle: Text(
+                    '${_gb(gpu.freeMemoryBytes / (1024 * 1024))} free of '
+                    '${_gb(gpu.totalMemoryBytes / (1024 * 1024))}'
+                    '${gpu.memorySpeedGbps > 0 ? ' · ${gpu.memorySpeedGbps.toStringAsFixed(1)} GB/s' : ''}',
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+      if (cluster.localCpuDevice.value != null) ...[
+        const SizedBox(height: 12),
+        AppCard(
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.memory_rounded),
+            title: Text('CPU · ${cluster.localCpuDevice.value!.name}'),
+            subtitle: Text(
+              '${_gb(cluster.localCpuDevice.value!.freeMemoryBytes / (1024 * 1024))} '
+              'available of ${_gb(cluster.localCpuDevice.value!.totalMemoryBytes / (1024 * 1024))}'
+              ' · ${cluster.localCpuDevice.value!.logicalCores} threads'
+              '\nShared RAM is counted once; the integrated GPU uses this same pool.',
+            ),
+          ),
+        ),
+      ],
       const SectionFootnote(
-        'Used the next time you load a GGUF model. If the model fits on this '
-        'phone you can keep it here, which is faster. If it doesn\'t, the '
-        'fastest phones get the biggest share and phones that aren\'t needed '
-        'are left out.',
+        'Paired devices communicate over the local network through the '
+        'llama.cpp RPC link. The master keeps the chat session; workers '
+        'provide their assigned model memory. Changes apply on the next load.',
       ),
       const SectionHeader('Other ways to add'),
       Row(children: [
@@ -272,6 +353,62 @@ class _ClusterViewState extends State<ClusterView> {
     ];
   }
 
+  Widget _lanModelsSection(BuildContext context, LanModelShareService sharing) {
+    final t = AppTokens.of(context);
+    return Obx(() {
+      final remoteModels = [
+        for (final peer in sharing.peers)
+          for (final model in peer.models) (peer: peer, model: model),
+      ];
+      return AppCard(
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Row(children: [
+            Icon(Icons.lan_outlined, color: t.accent),
+            const SizedBox(width: 10),
+            Expanded(child: Text('Models on LAN', style: t.bodyStrong)),
+            PillButton(
+              label: sharing.isScanning.value ? 'Searching…' : 'Find',
+              icon: Icons.search_rounded,
+              onPressed: sharing.isScanning.value ? null : sharing.scan,
+            ),
+          ]),
+          const SizedBox(height: 6),
+          Text(
+            remoteModels.isEmpty
+                ? 'Find model files shared by another PrivateLM device on this Wi-Fi.'
+                : '${remoteModels.length} model file(s) available nearby.',
+            style: t.caption,
+          ),
+          if (remoteModels.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            for (final item in remoteModels)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(item.model),
+                subtitle: Text(item.peer.name),
+                trailing: PillButton(
+                  label: 'Copy',
+                  primary: true,
+                  onPressed: () async {
+                    final error = await sharing.download(item.peer, item.model);
+                    if (error != null) {
+                      showToast('Model share failed', error,
+                          tone: ToastTone.error);
+                    } else {
+                      showToast('Model copied', item.model,
+                          tone: ToastTone.success);
+                    }
+                  },
+                ),
+              ),
+          ],
+        ]),
+      );
+    });
+  }
+
   Future<void> _scanQr() async {
     final code = await Get.to<String>(() => const _QrScanPage());
     if (code != null) await _report(cluster.addFromQr(code));
@@ -295,7 +432,8 @@ class _ClusterViewState extends State<ClusterView> {
             onSubmitted: (v) => Navigator.pop(ctx, v),
           ),
           const SizedBox(height: 16),
-          PrimaryButton(label: 'Add', onPressed: () => Navigator.pop(ctx, ctrl.text)),
+          PrimaryButton(
+              label: 'Add', onPressed: () => Navigator.pop(ctx, ctrl.text)),
         ],
       ),
     );
@@ -324,13 +462,20 @@ class _SplitCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
-    final colors = [t.accent, t.green, t.orange, const Color(0xFFAF52DE), t.red];
+    final colors = [
+      t.accent,
+      t.green,
+      t.orange,
+      const Color(0xFFAF52DE),
+      t.red
+    ];
     final total = shares.fold<double>(0, (a, s) => a + s.mb);
     return AppCard(
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text('Loaded model', style: t.bodyStrong),
         const SizedBox(height: 2),
-        Text('Running on ${shares.length} phones · ${_gb(total)}', style: t.caption),
+        Text('Running on ${shares.length} phones · ${_gb(total)}',
+            style: t.caption),
         const SizedBox(height: 14),
         ClipRRect(
           borderRadius: BorderRadius.circular(6),
@@ -341,7 +486,8 @@ class _SplitCard extends StatelessWidget {
                 Expanded(
                   flex: (shares[i].mb / total * 1000).round().clamp(1, 1000),
                   child: Container(
-                    margin: EdgeInsets.only(right: i == shares.length - 1 ? 0 : 2),
+                    margin:
+                        EdgeInsets.only(right: i == shares.length - 1 ? 0 : 2),
                     color: colors[i % colors.length],
                   ),
                 ),
@@ -357,15 +503,19 @@ class _SplitCard extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  shares[i].isThisPhone ? '${shares[i].name} (this phone)' : shares[i].name,
+                  shares[i].isThisPhone
+                      ? '${shares[i].name} (this phone)'
+                      : shares[i].name,
                   style: t.body,
                 ),
               ),
-              Text('${(shares[i].mb / total * 100).round()}%', style: t.bodyStrong),
+              Text('${(shares[i].mb / total * 100).round()}%',
+                  style: t.bodyStrong),
               const SizedBox(width: 10),
               SizedBox(
                 width: 58,
-                child: Text(_gb(shares[i].mb), textAlign: TextAlign.right, style: t.caption),
+                child: Text(_gb(shares[i].mb),
+                    textAlign: TextAlign.right, style: t.caption),
               ),
             ]),
           ),
@@ -399,10 +549,11 @@ class _PulsingDot extends StatefulWidget {
   State<_PulsingDot> createState() => _PulsingDotState();
 }
 
-class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderStateMixin {
-  late final AnimationController _c =
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))
-        ..repeat();
+class _PulsingDotState extends State<_PulsingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 1400))
+    ..repeat();
 
   @override
   void dispose() {
@@ -429,7 +580,8 @@ class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderState
           Container(
             width: 24,
             height: 24,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: widget.color),
+            decoration:
+                BoxDecoration(shape: BoxShape.circle, color: widget.color),
             child: const Icon(Icons.hub_rounded, size: 14, color: Colors.white),
           ),
         ]),

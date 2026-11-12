@@ -1,5 +1,6 @@
 import 'dart:async';
-import 'dart:io' show File, InternetAddressType, NetworkInterface, Platform;
+import 'dart:io'
+    show File, InternetAddressType, NetworkInterface, Platform, Socket;
 import 'dart:math' as math;
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -13,6 +14,7 @@ import '../core/constants.dart';
 import '../core/ui.dart';
 import 'app_log_service.dart';
 import 'hive_service.dart';
+import 'inference_linux_engine.dart';
 
 /// What this phone does in a phone cluster.
 enum ClusterRole {
@@ -33,6 +35,50 @@ class ClusterShare {
   const ClusterShare(this.name, this.mb, {this.isThisPhone = false});
 }
 
+/// One local Vulkan device. Linux exposes every physical GPU separately so
+/// the master can keep a model on the best device instead of treating the PC
+/// as one anonymous pool.
+class LocalGpuDevice {
+  final int index;
+  final String name;
+  final int freeMemoryBytes;
+  final int totalMemoryBytes;
+  final double memorySpeedGbps;
+  final bool selected;
+
+  const LocalGpuDevice({
+    required this.index,
+    required this.name,
+    required this.freeMemoryBytes,
+    required this.totalMemoryBytes,
+    required this.memorySpeedGbps,
+    this.selected = true,
+  });
+
+  LocalGpuDevice copyWith({bool? selected}) => LocalGpuDevice(
+        index: index,
+        name: name,
+        freeMemoryBytes: freeMemoryBytes,
+        totalMemoryBytes: totalMemoryBytes,
+        memorySpeedGbps: memorySpeedGbps,
+        selected: selected ?? this.selected,
+      );
+}
+
+class LocalCpuDevice {
+  final String name;
+  final int freeMemoryBytes;
+  final int totalMemoryBytes;
+  final int logicalCores;
+
+  const LocalCpuDevice({
+    required this.name,
+    required this.freeMemoryBytes,
+    required this.totalMemoryBytes,
+    required this.logicalCores,
+  });
+}
+
 /// A phone the master can put layers on, for planning a load.
 class _Phone {
   final ClusterWorker? worker; // null: the master itself
@@ -47,11 +93,17 @@ class _Phone {
 class ClusterService extends GetxService {
   final HiveService _hive = Get.find<HiveService>();
 
-  static bool get isSupported => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  static bool get isSupported =>
+      !kIsWeb && (Platform.isAndroid || Platform.isIOS || Platform.isLinux);
 
   /// Running a model across workers is Android-only for now; iOS devices
   /// can be workers (their GPU serves a master's layers).
-  static bool get canBeMaster => !kIsWeb && Platform.isAndroid;
+  static bool get canBeMaster =>
+      !kIsWeb && (Platform.isAndroid || Platform.isLinux);
+
+  /// Linux uses llama.cpp's native RPC server; phones use the plugin worker.
+  static bool get canBeWorker =>
+      !kIsWeb && (Platform.isAndroid || Platform.isIOS || Platform.isLinux);
 
   /// iOS can't stop the worker without closing the app.
   static bool get workerStopsWithApp => !kIsWeb && Platform.isIOS;
@@ -83,6 +135,8 @@ class ClusterService extends GetxService {
 
   /// How the loaded model is spread across phones; empty when it isn't.
   final split = <ClusterShare>[].obs;
+  final localGpuDevices = <LocalGpuDevice>[].obs;
+  final localCpuDevice = Rxn<LocalCpuDevice>();
 
   String deviceName = '';
   double? _localSpeed;
@@ -98,20 +152,28 @@ class ClusterService extends GetxService {
   String? get splitSummary {
     final total = split.fold<double>(0, (a, s) => a + s.mb);
     if (split.length < 2 || total <= 0) return null;
-    return split.map((s) => '${s.name} ${(s.mb / total * 100).round()}%').join(' · ');
+    return split
+        .map((s) => '${s.name} ${(s.mb / total * 100).round()}%')
+        .join(' · ');
   }
 
   @override
   void onInit() {
     super.onInit();
-    enabled.value = _hive.getSetting<bool>(AppConstants.keyClusterEnabled) ?? false;
-    final saved = _hive.getSetting<List>(AppConstants.keyClusterWorkers) ?? const [];
+    enabled.value =
+        _hive.getSetting<bool>(AppConstants.keyClusterEnabled) ?? false;
+    final saved =
+        _hive.getSetting<List>(AppConstants.keyClusterWorkers) ?? const [];
     workers.assignAll(saved.whereType<Map>().map(ClusterWorker.fromMap));
     if (isSupported) {
       if (Platform.isIOS) {
         DeviceInfoPlugin().iosInfo.then((info) => deviceName = info.modelName);
-      } else {
+      } else if (Platform.isAndroid) {
         DeviceInfoPlugin().androidInfo.then((info) => deviceName = info.model);
+      } else {
+        deviceName = 'Linux desktop';
+        refreshLocalGpuDevices();
+        refreshLocalCpuDevice();
       }
       refreshWorkerStatus().then((_) {
         if (worker.value.running) _watchWorker();
@@ -123,6 +185,81 @@ class ClusterService extends GetxService {
       refreshWifiAddress();
     }
   }
+
+  Future<void> refreshLocalGpuDevices() async {
+    if (!Platform.isLinux || !LinuxLlamaEngine.bridgeAvailable) return;
+    final names = LinuxLlamaEngine.gpuNames;
+    final speeds = LinuxLlamaEngine.gpuMemorySpeeds;
+    final savedSelection =
+        _hive.getSetting<List>(AppConstants.keyClusterGpuSelection);
+    final selectedIndices =
+        savedSelection?.whereType<num>().map((i) => i.toInt()).toSet();
+    final devices = <LocalGpuDevice>[];
+    for (var i = 0; i < names.length; i++) {
+      final old = localGpuDevices.firstWhereOrNull((d) => d.index == i);
+      devices.add(LocalGpuDevice(
+        index: i,
+        name: names[i],
+        freeMemoryBytes: LinuxLlamaEngine.gpuFreeMemoryBytes(i),
+        totalMemoryBytes: LinuxLlamaEngine.gpuTotalMemory(i),
+        memorySpeedGbps: speeds.length > i ? speeds[i] : 0,
+        selected: old?.selected ??
+            (selectedIndices == null || selectedIndices.contains(i)),
+      ));
+    }
+
+    localGpuDevices.assignAll(devices);
+    LinuxLlamaEngine.setGpuSelection(
+        devices.where((d) => d.selected).map((d) => d.index).toList());
+    await _saveGpuSelection();
+  }
+
+  void refreshLocalCpuDevice() {
+    if (!Platform.isLinux) return;
+    final total = _linuxTotalRamBytes();
+    final free = _linuxFreeRamBytes();
+    localCpuDevice.value = LocalCpuDevice(
+      name: LinuxLlamaEngine.cpuName,
+      freeMemoryBytes: free,
+      totalMemoryBytes: total,
+      logicalCores: Platform.numberOfProcessors,
+    );
+  }
+
+  void setLocalGpuSelected(int index, bool selected) {
+    final i = localGpuDevices.indexWhere((d) => d.index == index);
+    if (i < 0) return;
+    localGpuDevices[i] = localGpuDevices[i].copyWith(selected: selected);
+    LinuxLlamaEngine.setGpuSelection(
+        localGpuDevices.where((d) => d.selected).map((d) => d.index).toList());
+    localGpuDevices.refresh();
+    unawaited(_saveGpuSelection());
+  }
+
+  void autoSelectLocalGpus() {
+    if (localGpuDevices.isEmpty) return;
+    final sorted = [...localGpuDevices]
+      ..sort((a, b) => b.memorySpeedGbps.compareTo(a.memorySpeedGbps));
+    final fastest = sorted.first;
+    localGpuDevices.assignAll([
+      for (final d in localGpuDevices)
+        d.copyWith(selected: d.index == fastest.index)
+    ]);
+    LinuxLlamaEngine.setGpuSelection([fastest.index]);
+    unawaited(_saveGpuSelection());
+  }
+
+  void selectAllLocalGpus() {
+    localGpuDevices.assignAll(
+        localGpuDevices.map((d) => d.copyWith(selected: true)).toList());
+    LinuxLlamaEngine.setGpuSelection(
+        localGpuDevices.map((d) => d.index).toList());
+    unawaited(_saveGpuSelection());
+  }
+
+  Future<void> _saveGpuSelection() => _hive.setSetting(
+      AppConstants.keyClusterGpuSelection,
+      localGpuDevices.where((d) => d.selected).map((d) => d.index).toList());
 
   @override
   void onClose() {
@@ -139,14 +276,17 @@ class ClusterService extends GetxService {
     final on = s.running || s.starting || serving.value;
     if (on == _screenKeptOn) return;
     _screenKeptOn = on;
-    LlamaCluster.setKeepScreenOn(on).catchError((_) {});
+    if (!Platform.isLinux) {
+      LlamaCluster.setKeepScreenOn(on).catchError((_) {});
+    }
   }
 
   Future<void> setRole(ClusterRole next) async {
     if (next == role) return;
     if (next != ClusterRole.worker && role == ClusterRole.worker) {
       if (workerStopsWithApp) {
-        showToast('Still sharing', 'Close PrivateLM to stop sharing this device.');
+        showToast(
+            'Still sharing', 'Close PrivateLM to stop sharing this device.');
         return;
       }
       await stopWorker();
@@ -174,11 +314,32 @@ class ClusterService extends GetxService {
   }
 
   Future<void> startWorker() async {
+    if (!canBeWorker) return;
+    if (Platform.isLinux) {
+      _workerRequested.value = true;
+      worker.value = const ClusterWorkerStatus(state: 'starting');
+      await LinuxLlamaEngine.startWorker();
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (LinuxLlamaEngine.gpuNames.isNotEmpty) {
+        deviceName = 'Linux desktop · ${LinuxLlamaEngine.gpuNames.join(' + ')}';
+      }
+      worker.value = ClusterWorkerStatus(
+        state: LinuxLlamaEngine.workerRunning ? 'running' : 'error',
+        error: LinuxLlamaEngine.workerRunning
+            ? null
+            : 'Could not start the Linux RPC worker',
+        ramMb: _linuxAvailableRamMb().round(),
+        bandwidth: 4.0,
+        id: 'linux-${deviceName.hashCode}',
+      );
+      return;
+    }
     if (Platform.isAndroid) {
       // Unrestricted battery keeps Android (Samsung especially) from moving
       // the worker to slow cores once it gets busy.
       final status = await LlamaCluster.workerStatus();
-      if (!status.batteryUnrestricted) await LlamaCluster.requestBatteryUnrestricted();
+      if (!status.batteryUnrestricted)
+        await LlamaCluster.requestBatteryUnrestricted();
     }
     _workerRequested.value = true;
     worker.value = const ClusterWorkerStatus(state: 'starting');
@@ -189,6 +350,11 @@ class ClusterService extends GetxService {
   Future<void> stopWorker() async {
     _workerRequested.value = false;
     _statusTimer?.cancel();
+    if (Platform.isLinux) {
+      await LinuxLlamaEngine.stopWorker();
+      worker.value = const ClusterWorkerStatus(state: 'stopped');
+      return;
+    }
     await LlamaCluster.stopWorker();
     await Future.delayed(const Duration(milliseconds: 600));
     await refreshWorkerStatus();
@@ -211,10 +377,15 @@ class ClusterService extends GetxService {
   }
 
   Future<void> refreshWorkerStatus() async {
+    if (Platform.isLinux) {
+      worker.value = const ClusterWorkerStatus(state: 'stopped');
+      return;
+    }
     try {
       worker.value = await LlamaCluster.workerStatus();
     } catch (e) {
-      Get.find<AppLogService>().error('Cluster worker status failed', details: e);
+      Get.find<AppLogService>()
+          .error('Cluster worker status failed', details: e);
     }
   }
 
@@ -222,8 +393,12 @@ class ClusterService extends GetxService {
   /// iOS), if any.
   Future<void> refreshWifiAddress() async {
     try {
-      final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
-      final wifi = interfaces.where((i) => i.name.startsWith('wlan') || i.name == 'en0');
+      final interfaces =
+          await NetworkInterface.list(type: InternetAddressType.IPv4);
+      final wifi = Platform.isLinux
+          ? interfaces.where((i) => !i.name.startsWith('lo'))
+          : interfaces
+              .where((i) => i.name.startsWith('wlan') || i.name == 'en0');
       wifiAddress.value = wifi.isEmpty || wifi.first.addresses.isEmpty
           ? null
           : wifi.first.addresses.first.address;
@@ -241,7 +416,10 @@ class ClusterService extends GetxService {
     final params = uri?.queryParameters ?? const {};
     final host = params['host'];
     final port = int.tryParse(params['port'] ?? '');
-    if (uri == null || uri.scheme != _qrScheme || host == null || port == null) {
+    if (uri == null ||
+        uri.scheme != _qrScheme ||
+        host == null ||
+        port == null) {
       return 'That isn\'t a PrivateLM worker code';
     }
     return _add(ClusterWorker(
@@ -260,7 +438,8 @@ class ClusterService extends GetxService {
   Future<String?> addManual(String input) async {
     final text = input.trim();
     if (text.isEmpty) return 'Enter the worker phone\'s IP address';
-    final host = text.contains(':') ? text.substring(0, text.lastIndexOf(':')) : text;
+    final host =
+        text.contains(':') ? text.substring(0, text.lastIndexOf(':')) : text;
     final port = text.contains(':')
         ? int.tryParse(text.substring(text.lastIndexOf(':') + 1))
         : LlamaCluster.defaultPort;
@@ -276,9 +455,10 @@ class ClusterService extends GetxService {
   Future<List<ClusterWorker>> relocateWorkers() async {
     final missing = <ClusterWorker>[];
     for (final w in workers) {
-      if (!await LlamaCluster.probe(w.endpoint)) missing.add(w);
+      if (!await _probe(w.endpoint)) missing.add(w);
     }
     if (missing.isEmpty) return const [];
+    if (Platform.isLinux) return missing;
     final seen = await LlamaCluster.discover();
     var moved = 0;
     final unreachable = <ClusterWorker>[];
@@ -294,13 +474,14 @@ class ClusterService extends GetxService {
     }
     if (moved > 0) {
       await _save();
-      Get.find<AppLogService>().info('Phone cluster: found $moved worker(s) at a new address');
+      Get.find<AppLogService>()
+          .info('Phone cluster: found $moved worker(s) at a new address');
     }
     return unreachable;
   }
 
   Future<String?> _add(ClusterWorker worker) async {
-    if (!await LlamaCluster.probe(worker.endpoint)) {
+    if (!await _probe(worker.endpoint)) {
       return 'Can\'t reach ${worker.endpoint}. Check that the phone is a worker '
           'and on the same Wi-Fi.';
     }
@@ -323,10 +504,31 @@ class ClusterService extends GetxService {
     if (isScanning.value) return;
     isScanning.value = true;
     try {
+      if (Platform.isLinux) {
+        found.clear();
+        return;
+      }
       final list = await LlamaCluster.discover();
       found.assignAll(list.where((w) => !isAdded(w)));
     } finally {
       isScanning.value = false;
+    }
+  }
+
+  Future<bool> _probe(String endpoint) async {
+    if (!Platform.isLinux) return LlamaCluster.probe(endpoint);
+    final separator = endpoint.lastIndexOf(':');
+    final host = separator > 0 ? endpoint.substring(0, separator) : '';
+    final port =
+        separator > 0 ? int.tryParse(endpoint.substring(separator + 1)) : null;
+    if (host.isEmpty || port == null) return false;
+    try {
+      final socket =
+          await Socket.connect(host, port, timeout: const Duration(seconds: 2));
+      await socket.close();
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -354,14 +556,16 @@ class ClusterService extends GetxService {
     split.clear();
     if (!isSupported) return 0;
     if (!enabled.value || workers.isEmpty) {
-      await LlamaCluster.clear();
+      await _clearCluster();
       return 0;
     }
 
     // Workers that are off or away are left out, not fatal: the model may
     // fit without them.
     final offline = await relocateWorkers();
-    final available = workers.where((w) => !offline.any((o) => o.endpoint == w.endpoint)).toList();
+    final available = workers
+        .where((w) => !offline.any((o) => o.endpoint == w.endpoint))
+        .toList();
     if (offline.isNotEmpty) {
       final names = offline.map((w) => w.model ?? w.name).join(', ');
       showToast('Phone cluster', 'Not reachable, loading without: $names');
@@ -369,10 +573,13 @@ class ClusterService extends GetxService {
 
     final modelMb = await File(modelPath).length() / (1024 * 1024);
     final needMb = modelMb * 1.1; // + KV cache and working buffers
-    _localSpeed ??= await LlamaCluster.benchmark();
+    _localSpeed ??= Platform.isLinux ? 4.0 : await LlamaCluster.benchmark();
     // Free RAM: workers report theirs when they start. The master also runs
     // the app and the KV cache, so it offers less of its own.
-    final master = _Phone(null, await LlamaCluster.localFreeRamMb() * 0.7, _localSpeed!);
+    final localRamMb = Platform.isLinux
+        ? _linuxAvailableRamMb()
+        : await LlamaCluster.localFreeRamMb();
+    final master = _Phone(null, localRamMb * 0.7, _localSpeed!);
     final phones = [
       master,
       for (final w in available)
@@ -388,14 +595,14 @@ class ClusterService extends GetxService {
     }
 
     if (available.isEmpty) {
-      await LlamaCluster.clear();
+      await _clearCluster();
       return 0;
     }
     if (needMb <= master.capacityMb) {
       final share = await _askFitsHere(
           modelName ?? modelPath.split('/').last, modelMb, available.length);
       if (!share) {
-        await LlamaCluster.clear();
+        await _clearCluster();
         return 0;
       }
       _splitBySpeed(phones, needMb);
@@ -403,23 +610,68 @@ class ClusterService extends GetxService {
       _fillFastestFirst(phones, needMb);
     }
 
-    final used = phones.where((p) => p.worker != null && p.assignedMb > 0).toList();
+    final used =
+        phones.where((p) => p.worker != null && p.assignedMb > 0).toList();
     if (used.isEmpty) {
-      await LlamaCluster.clear();
+      await _clearCluster();
       return 0;
     }
     try {
-      await LlamaCluster.setCluster(
-        [for (final p in used) p.worker!],
-        weights: [for (final p in used) p.assignedMb],
-        localWeight: master.assignedMb,
-      );
+      if (Platform.isLinux) {
+        LinuxLlamaEngine.setCluster(
+          [for (final p in used) p.worker!.endpoint],
+          [for (final p in used) p.assignedMb],
+          master.assignedMb,
+        );
+      } else {
+        await LlamaCluster.setCluster(
+          [for (final p in used) p.worker!],
+          weights: [for (final p in used) p.assignedMb],
+          localWeight: master.assignedMb,
+        );
+      }
     } on PlatformException catch (e) {
       throw Exception(
           '${e.message ?? 'A worker is unreachable'}. Turn on Worker on that '
           'phone, or set this phone\'s Phone cluster to Off.');
     }
     return used.length;
+  }
+
+  Future<void> _clearCluster() async {
+    if (Platform.isLinux) {
+      LinuxLlamaEngine.setCluster(const [], const [], 1.0);
+    } else {
+      await LlamaCluster.clear();
+    }
+  }
+
+  double _linuxAvailableRamMb() {
+    try {
+      return _linuxFreeRamBytes() / (1024 * 1024);
+    } catch (_) {
+      return 4096;
+    }
+  }
+
+  int _linuxFreeRamBytes() {
+    final text = File('/proc/meminfo').readAsStringSync();
+    final line =
+        text.split('\n').firstWhere((line) => line.startsWith('MemAvailable:'));
+    final kb = int.tryParse(line.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+    return kb * 1024;
+  }
+
+  int _linuxTotalRamBytes() {
+    try {
+      final text = File('/proc/meminfo').readAsStringSync();
+      final line =
+          text.split('\n').firstWhere((line) => line.startsWith('MemTotal:'));
+      final kb = int.tryParse(line.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+      return kb * 1024;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /// Fastest first, each up to its free memory, until the model is placed.
@@ -463,11 +715,13 @@ class ClusterService extends GetxService {
   /// alone. True to go ahead.
   Future<bool> confirmLiteRtRunsHere(String model) async {
     final context = Get.context;
-    if (role != ClusterRole.master || workers.isEmpty || context == null) return true;
+    if (role != ClusterRole.master || workers.isEmpty || context == null)
+      return true;
     final go = await showAppSheet<bool>(
       context,
       title: 'This model can\'t use your workers',
-      subtitle: '${model.replaceAll(RegExp(r'\.(litertlm|task)$'), '')} is a LiteRT '
+      subtitle:
+          '${model.replaceAll(RegExp(r'\.(litertlm|task)$'), '')} is a LiteRT '
           'model, and only GGUF models can be shared across phones. It will run '
           'on this phone only. To use your workers, load a GGUF model instead.',
       builder: (ctx) => Column(
@@ -479,7 +733,8 @@ class ClusterService extends GetxService {
             onPressed: () => Navigator.pop(ctx, true),
           ),
           const SizedBox(height: 10),
-          TonalButton.neutral(ctx, label: 'Cancel', onTap: () => Navigator.pop(ctx, false)),
+          TonalButton.neutral(ctx,
+              label: 'Cancel', onTap: () => Navigator.pop(ctx, false)),
         ],
       ),
     );
@@ -487,7 +742,8 @@ class ClusterService extends GetxService {
   }
 
   /// "Fits on this phone" sheet. True to share with workers anyway.
-  Future<bool> _askFitsHere(String model, double modelMb, int workerCount) async {
+  Future<bool> _askFitsHere(
+      String model, double modelMb, int workerCount) async {
     final context = Get.context;
     if (context == null) return false;
     final share = await showAppSheet<bool>(
@@ -508,7 +764,8 @@ class ClusterService extends GetxService {
           const SizedBox(height: 10),
           TonalButton.neutral(
             ctx,
-            label: 'Share with $workerCount worker${workerCount == 1 ? '' : 's'}',
+            label:
+                'Share with $workerCount worker${workerCount == 1 ? '' : 's'}',
             onTap: () => Navigator.pop(ctx, true),
           ),
         ],
@@ -528,14 +785,17 @@ class ClusterService extends GetxService {
       final open = b.name.indexOf('[');
       if (open < 0) continue;
       final endpoint = b.name.substring(open + 1, b.name.lastIndexOf(']'));
-      final name = workers.firstWhereOrNull((w) => w.endpoint == endpoint)?.model ?? endpoint;
+      final name =
+          workers.firstWhereOrNull((w) => w.endpoint == endpoint)?.model ??
+              endpoint;
       remote[name] = (remote[name] ?? 0) + b.mb;
     }
     final fileMb = await File(modelPath).length() / (1024 * 1024);
     final remoteMb = remote.values.fold<double>(0, (a, b) => a + b);
     split.assignAll([
       ClusterShare(deviceName.isEmpty ? 'This phone' : deviceName,
-          math.max(0, fileMb - remoteMb), isThisPhone: true),
+          math.max(0, fileMb - remoteMb),
+          isThisPhone: true),
       for (final e in remote.entries) ClusterShare(e.key, e.value),
     ]);
   }

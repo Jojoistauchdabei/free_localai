@@ -24,6 +24,7 @@ import 'services/device_info_service.dart';
 import 'services/local_image_service.dart';
 import 'services/app_log_service.dart';
 import 'services/crash_reporting_service.dart';
+import 'services/lan_model_share_service.dart';
 import 'services/image_generation_notification_service.dart';
 import 'core/constants.dart';
 
@@ -90,15 +91,17 @@ void main() {
     Get.put(InferenceService());
     Get.put(CloudService());
     Get.put(DownloadService());
+    Get.put(LanModelShareService(), permanent: true);
     if (UpdateService.isSupported) Get.put(UpdateService(), permanent: true);
     Get.put(LocalImageService());
-    final crashReporting = await Get.putAsync(() => CrashReportingService().init().timeout(
-          const Duration(seconds: 10),
-          onTimeout: () {
-            appLog.error('CrashReportingService.init timed out');
-            return CrashReportingService();
-          },
-        ));
+    final crashReporting =
+        await Get.putAsync(() => CrashReportingService().init().timeout(
+              const Duration(seconds: 10),
+              onTimeout: () {
+                appLog.error('CrashReportingService.init timed out');
+                return CrashReportingService();
+              },
+            ));
     FlutterError.onError = (details) {
       FlutterError.presentError(details);
       appLog.error(

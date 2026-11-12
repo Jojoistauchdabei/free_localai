@@ -58,17 +58,17 @@ jobs:
         run: |
           flutter config --jdk-dir "$JAVA_HOME"
           flutter pub get
-          for attempt in 1 2 3 4 5; do
-            if ./android/gradlew --version; then
-              break
-            fi
-            if [ "$attempt" -eq 5 ]; then
-              exit 1
-            fi
-            sleep $((attempt * 10))
+          for package in apk appbundle; do
+            for attempt in 1 2 3 4 5; do
+              if flutter build "$package" --release; then
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                exit 1
+              fi
+              sleep $((attempt * 10))
+            done
           done
-          flutter build apk --release
-          flutter build appbundle --release
 
       - name: Upload Android packages
         uses: actions/upload-artifact@v4

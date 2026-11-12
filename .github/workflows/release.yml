@@ -43,6 +43,8 @@ jobs:
 
       - name: Install Android SDK components
         uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android NDK and shader compiler
         run: |

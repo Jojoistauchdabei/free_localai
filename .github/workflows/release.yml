@@ -55,6 +55,8 @@ jobs:
           sudo apt-get install -y glslc
 
       - name: Build Android packages
+        env:
+          PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING: 'true'
         run: |
           flutter config --jdk-dir "$JAVA_HOME"
           flutter pub get

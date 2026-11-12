@@ -58,6 +58,15 @@ jobs:
         run: |
           flutter config --jdk-dir "$JAVA_HOME"
           flutter pub get
+          for attempt in 1 2 3 4 5; do
+            if ./android/gradlew --version; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
           flutter build apk --release
           flutter build appbundle --release
 

@@ -64,6 +64,15 @@ jobs:
           if [ -f "$inappwebview_gradle" ]; then
             sed -i 's/proguard-android\.txt/proguard-android-optimize.txt/g' "$inappwebview_gradle"
           fi
+          file_picker_gradle="$PUB_CACHE/hosted/pub.dev/file_picker-11.0.3/android/build.gradle"
+          if [ -f "$file_picker_gradle" ]; then
+            sed -i '/if (!isAgp9OrAbove) {/{
+              N
+              /apply plugin: '\''org.jetbrains.kotlin.android'\''/{
+                s/if (!isAgp9OrAbove) {\n    apply plugin: '\''org.jetbrains.kotlin.android'\''\n}/apply plugin: '\''org.jetbrains.kotlin.android'\''/
+              }
+            }' "$file_picker_gradle"
+          fi
           for package in apk appbundle; do
             for attempt in 1 2 3 4 5; do
               if flutter build "$package" --release; then

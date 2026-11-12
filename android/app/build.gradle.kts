@@ -1,5 +1,7 @@
 import java.util.Properties
 import java.io.FileInputStream
+import com.android.build.api.dsl.ApplicationExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -31,7 +33,7 @@ if (file("google-services.json").exists()) {
     apply(plugin = "com.google.firebase.crashlytics")
 }
 
-android {
+extensions.configure<ApplicationExtension> {
     namespace = "com.orailnoor.privatelm"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
@@ -48,10 +50,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     defaultConfig {
@@ -71,6 +69,12 @@ android {
                 keyPassword = keystoreProperties.getProperty("keyPassword")
                 storeFile = file(keystoreProperties.getProperty("storeFile"))
                 storePassword = keystoreProperties.getProperty("storePassword")
+            }
+        }
+
+        kotlin {
+            compilerOptions {
+                jvmTarget.set(JvmTarget.JVM_17)
             }
         }
     }

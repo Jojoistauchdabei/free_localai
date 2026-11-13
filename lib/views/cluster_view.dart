@@ -598,29 +598,12 @@ class _ClusterViewState extends State<ClusterView> {
   }
 
   Future<void> _enterIp(BuildContext context) async {
-    final ctrl = TextEditingController();
     final input = await showAppSheet<String>(
       context,
       title: 'Enter worker IP',
       subtitle: 'Shown under the worker\'s QR code',
-      builder: (ctx) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TextField(
-            controller: ctrl,
-            autofocus: true,
-            keyboardType: TextInputType.url,
-            decoration: appInputDecoration(ctx,
-                hint: '192.168.1.20:${LlamaCluster.defaultPort}'),
-            onSubmitted: (v) => Navigator.pop(ctx, v),
-          ),
-          const SizedBox(height: 16),
-          PrimaryButton(
-              label: 'Add', onPressed: () => Navigator.pop(ctx, ctrl.text)),
-        ],
-      ),
+      builder: (_) => const _WorkerIpEntrySheet(),
     );
-    ctrl.dispose();
     if (input != null) await _report(cluster.addManual(input));
   }
 
@@ -632,6 +615,44 @@ class _ClusterViewState extends State<ClusterView> {
       showToast('Worker added', 'Used the next time you load a GGUF model.',
           tone: ToastTone.success);
     }
+  }
+}
+
+class _WorkerIpEntrySheet extends StatefulWidget {
+  const _WorkerIpEntrySheet();
+
+  @override
+  State<_WorkerIpEntrySheet> createState() => _WorkerIpEntrySheetState();
+}
+
+class _WorkerIpEntrySheetState extends State<_WorkerIpEntrySheet> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.of(context).pop(_controller.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          controller: _controller,
+          autofocus: true,
+          keyboardType: TextInputType.url,
+          decoration: appInputDecoration(context,
+              hint: '192.168.1.20:${LlamaCluster.defaultPort}'),
+          onSubmitted: (_) => _submit(),
+        ),
+        const SizedBox(height: 16),
+        PrimaryButton(label: 'Add', onPressed: _submit),
+      ],
+    );
   }
 }
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -132,6 +133,18 @@ void main() {
 
     // Auto-configure inference settings based on device RAM
     _autoConfigureForDevice();
+
+    // Headless worker ("slave") start for desktop, e.g. a PC started with
+    // PRIVATELM_WORKER=1 to lend its CPU/RAM/GPU to a phone master.
+    if (Platform.environment['PRIVATELM_WORKER'] == '1' &&
+        ClusterService.isSupported) {
+      unawaited(Get.find<ClusterService>()
+          .startWorker()
+          .then((_) => Get.find<AppLogService>().info(
+              '[Cluster] auto-started worker from PRIVATELM_WORKER=1'))
+          .catchError((e) => Get.find<AppLogService>()
+              .error('[Cluster] auto worker start failed', details: e)));
+    }
 
     // Keep last model as a quick-load option, but do not auto-load on startup.
     _validateLastModel();

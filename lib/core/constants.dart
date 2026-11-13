@@ -67,6 +67,11 @@ class AppConstants {
   static const String keyClusterEnabled = 'cluster_enabled';
   static const String keyClusterWorkers = 'cluster_workers';
   static const String keyClusterGpuSelection = 'cluster_gpu_selection';
+  static const String keyClusterScheduleMode = 'cluster_schedule_mode';
+  static const String keyClusterWorkerWeights = 'cluster_worker_weights';
+  static const String keyClusterLocalWeight = 'cluster_local_weight';
+  static const String keyClusterCpuTops = 'cluster_cpu_tops';
+  static const String keyClusterBenchmark = 'cluster_benchmark';
   static const String keyImageSteps = 'image_steps';
   static const String keyImageGenForceCpu = 'image_gen_force_cpu';
   static const String keyImageGenBackend = 'image_gen_backend';
@@ -417,7 +422,7 @@ class AppConstants {
       'filename': 'Ternary-Bonsai-2-27B-Q2_0.gguf',
       'url':
           'https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/Ternary-Bonsai-2-27B-Q2_0.gguf',
-      'size': 'about 10 GB',
+      'size': '7.63 GB',
       'description':
           'Ternary Bonsai 2 27B; a strong candidate for Phone cluster loading',
       'template': 'chatml',

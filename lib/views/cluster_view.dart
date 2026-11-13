@@ -8,6 +8,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 
 import '../core/ui.dart';
 import '../services/cluster_service.dart';
+import '../services/inference_service.dart';
 import '../services/lan_model_share_service.dart';
 
 /// Phone cluster: pick Master (runs the model) or Worker (lends this phone),
@@ -215,6 +216,8 @@ class _ClusterViewState extends State<ClusterView> {
   List<Widget> _masterSection(BuildContext context) {
     final t = AppTokens.of(context);
     return [
+      _scheduleCard(context),
+      const SizedBox(height: 16),
       if (cluster.split.length > 1) ...[
         _SplitCard(shares: cluster.split),
         const SizedBox(height: 16),
@@ -253,6 +256,37 @@ class _ClusterViewState extends State<ClusterView> {
               ),
             ),
         ]),
+      if (cluster.workers.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        SectionHeader('Paired device resources'),
+        AppCard(
+          child: Column(
+            children: [
+              for (final worker in cluster.workers)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.device_hub_rounded),
+                  title: Text(worker.model ?? worker.name),
+                  subtitle: Text([
+                    if (worker.ramMb != null)
+                      '${_gb(worker.ramMb!)} free system RAM',
+                    if (worker.bandwidth != null)
+                      '${worker.bandwidth!.toStringAsFixed(1)} GB/s memory',
+                    if (cluster.split.isNotEmpty)
+                      '${_shareFor(worker)} model share',
+                  ].join(' · ')),
+                  trailing: Text(
+                    cluster.scheduleMode.value == 'manual' &&
+                            (cluster.workerWeights[worker.endpoint] ?? 0) == 0
+                        ? 'OFF'
+                        : 'ON',
+                    style: t.caption,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
       if (cluster.localGpuDevices.isNotEmpty) ...[
         const SizedBox(height: 20),
         SectionHeader('This PC: Vulkan devices'),
@@ -292,6 +326,7 @@ class _ClusterViewState extends State<ClusterView> {
                   subtitle: Text(
                     '${_gb(gpu.freeMemoryBytes / (1024 * 1024))} free of '
                     '${_gb(gpu.totalMemoryBytes / (1024 * 1024))}'
+                    ' · ${gpu.totalMemoryBytes > 0 ? ((1 - gpu.freeMemoryBytes / gpu.totalMemoryBytes) * 100).round() : 0}% memory used'
                     '${gpu.memorySpeedGbps > 0 ? ' · ${gpu.memorySpeedGbps.toStringAsFixed(1)} GB/s' : ''}',
                   ),
                 ),
@@ -310,6 +345,7 @@ class _ClusterViewState extends State<ClusterView> {
               '${_gb(cluster.localCpuDevice.value!.freeMemoryBytes / (1024 * 1024))} '
               'available of ${_gb(cluster.localCpuDevice.value!.totalMemoryBytes / (1024 * 1024))}'
               ' · ${cluster.localCpuDevice.value!.logicalCores} threads'
+              ' · ${cluster.localCpuDevice.value!.computeTops.toStringAsFixed(3)} TOPS'
               '\nShared RAM is counted once; the integrated GPU uses this same pool.',
             ),
           ),
@@ -353,6 +389,125 @@ class _ClusterViewState extends State<ClusterView> {
     ];
   }
 
+  Widget _scheduleCard(BuildContext context) {
+    final t = AppTokens.of(context);
+    final sharing = Get.isRegistered<LanModelShareService>()
+        ? Get.find<LanModelShareService>()
+        : null;
+    return Obx(() => AppCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('Master scheduling', style: t.bodyStrong),
+              const SizedBox(height: 4),
+              Text(
+                'Smart uses the fastest available devices. Manual lets you '
+                'exclude devices or assign their relative share.',
+                style: t.caption,
+              ),
+              const SizedBox(height: 10),
+              AppSegmented<String>(
+                items: const [('smart', 'Smart'), ('manual', 'Manual')],
+                selected: cluster.scheduleMode.value,
+                onChanged: cluster.setScheduleMode,
+              ),
+              if (cluster.scheduleMode.value == 'manual' &&
+                  cluster.workers.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _weightRow(
+                  label: 'This PC',
+                  value: cluster.localWeight.value,
+                  onChanged: cluster.setLocalWeight,
+                ),
+                for (final worker in cluster.workers)
+                  _weightRow(
+                    label: worker.model ?? worker.name,
+                    value: cluster.workerWeights[worker.endpoint] ?? 0,
+                    onChanged: (value) =>
+                        cluster.setWorkerWeight(worker, value),
+                  ),
+              ],
+              const Divider(height: 20),
+              Text('Live cluster statistics', style: t.bodyStrong),
+              const SizedBox(height: 8),
+              _clusterStats(context, sharing),
+            ],
+          ),
+        ));
+  }
+
+  String _shareFor(ClusterWorker worker) {
+    final share = cluster.split.firstWhereOrNull((item) =>
+        item.name == (worker.model ?? worker.name) ||
+        item.name == worker.endpoint);
+    return share == null ? 'not assigned' : _gb(share.mb);
+  }
+
+  Widget _weightRow({
+    required String label,
+    required double value,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Row(
+      children: [
+        Expanded(child: Text(label, overflow: TextOverflow.ellipsis)),
+        SizedBox(
+          width: 150,
+          child: Slider(
+            value: value.clamp(0, 100),
+            min: 0,
+            max: 100,
+            divisions: 20,
+            label: '${value.round()}%',
+            onChanged: onChanged,
+          ),
+        ),
+        SizedBox(width: 38, child: Text('${value.round()}%')),
+      ],
+    );
+  }
+
+  Widget _clusterStats(BuildContext context, LanModelShareService? sharing) {
+    final t = AppTokens.of(context);
+    final inference = Get.isRegistered<InferenceService>()
+        ? Get.find<InferenceService>()
+        : null;
+    final cpu = cluster.localCpuDevice.value;
+    final gpuMemory = cluster.localGpuDevices
+        .fold<int>(0, (sum, device) => sum + device.freeMemoryBytes);
+    final split = cluster.split;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          [
+            if (cpu != null)
+              'RAM frei ${(cpu.freeMemoryBytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB'
+                  ' · ${cpu.logicalCores} CPU-Threads',
+            if (gpuMemory > 0)
+              'GPU frei ${(gpuMemory / 1024 / 1024 / 1024).toStringAsFixed(1)} GB',
+            if (cluster.freeStorageBytes.value != null)
+              'Speicher frei ${(cluster.freeStorageBytes.value! / 1024 / 1024 / 1024).toStringAsFixed(1)} GB',
+            if (inference != null)
+              '${inference.tokensPerSecond.value.toStringAsFixed(1)} tok/s'
+                  ' · ${inference.tokenCount.value} Tokens',
+            if (sharing != null)
+              'LAN-Kopien ${(sharing.transferredBytes.value / 1024 / 1024).toStringAsFixed(1)} MB',
+          ].join('\n'),
+          style: t.caption,
+        ),
+        if (split.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          for (final share in split)
+            Text(
+              '${share.name}: ${(share.mb / 1024).toStringAsFixed(1)} GB Modellanteil',
+              style: t.caption,
+            ),
+        ],
+      ],
+    );
+  }
+
   Widget _lanModelsSection(BuildContext context, LanModelShareService sharing) {
     final t = AppTokens.of(context);
     return Obx(() {
@@ -388,20 +543,48 @@ class _ClusterViewState extends State<ClusterView> {
                 dense: true,
                 title: Text(item.model),
                 subtitle: Text(item.peer.name),
-                trailing: PillButton(
-                  label: 'Copy',
-                  primary: true,
-                  onPressed: () async {
-                    final error = await sharing.download(item.peer, item.model);
-                    if (error != null) {
-                      showToast('Model share failed', error,
-                          tone: ToastTone.error);
-                    } else {
-                      showToast('Model copied', item.model,
-                          tone: ToastTone.success);
-                    }
-                  },
-                ),
+                trailing: sharing.activeTransfers[item.model] == null
+                    ? PillButton(
+                        label: 'Copy',
+                        primary: true,
+                        onPressed: () async {
+                          final error =
+                              await sharing.download(item.peer, item.model);
+                          if (error != null) {
+                            showToast('Model share failed', error,
+                                tone: ToastTone.error);
+                          } else {
+                            showToast('Model copied', item.model,
+                                tone: ToastTone.success);
+                          }
+                        },
+                      )
+                    : SizedBox(
+                        width: 110,
+                        child: Obx(() {
+                          final transfer = sharing.activeTransfers[item.model];
+                          if (transfer == null) return const SizedBox.shrink();
+                          return Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              LinearProgressIndicator(
+                                  value: transfer.totalBytes.value > 0
+                                      ? transfer.progress
+                                      : null),
+                              const SizedBox(height: 2),
+                              Text(
+                                '${transfer.totalBytes.value > 0 ? '${(transfer.progress * 100).round()}% · ' : ''}'
+                                '${transfer.status.value} · '
+                                '${(transfer.bytesPerSecond.value / 1024 / 1024).toStringAsFixed(1)} MB/s',
+                                style: t.caption,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          );
+                        }),
+                      ),
               ),
           ],
         ]),

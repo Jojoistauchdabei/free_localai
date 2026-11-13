@@ -33,11 +33,8 @@ object ClusterNative {
     external fun nativeMemBandwidth(threads: Int): Double
 
     /**
-     * Fast cores this process may run on. A foreground service only gets
-     * some of the cores (e.g. 4 little + 2 big on a Snapdragon 845), and
-     * ggml threads wait for each other every step, so use one thread per
-     * *available* fast core, never more. 8 threads on a Poco F1 worker ran
-     * at 0.1 tok/s; 2 ran at 3 tok/s.
+     * CPUs this process may run on. Use every CPU allowed to the app so the
+     * master can make the final scheduling decision.
      */
     fun fastCoreCount(): Int {
         val allowed = File("/proc/self/status").readLines()
@@ -49,12 +46,6 @@ object ClusterNative {
                 (a.trim().toInt()..b.trim().toInt()).toList()
             }
             ?: (0 until Runtime.getRuntime().availableProcessors()).toList()
-        val maxFreq = allowed.associateWith { cpu ->
-            File("/sys/devices/system/cpu/cpu$cpu/cpufreq/cpuinfo_max_freq")
-                .takeIf { it.canRead() }?.readText()?.trim()?.toLongOrNull() ?: 0L
-        }
-        val top = maxFreq.values.maxOrNull() ?: 0L
-        val fast = if (top > 0) maxFreq.count { it.value >= top * 0.8 } else allowed.size / 2
-        return fast.coerceIn(2, 6)
+        return allowed.size.coerceAtLeast(1)
     }
 }

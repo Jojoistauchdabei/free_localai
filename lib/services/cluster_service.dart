@@ -1,6 +1,13 @@
 import 'dart:async';
 import 'dart:io'
-    show File, InternetAddressType, NetworkInterface, Platform, Socket;
+    show
+        Directory,
+        File,
+        InternetAddressType,
+        NetworkInterface,
+        Platform,
+        Process,
+        Socket;
 import 'dart:math' as math;
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -70,12 +77,14 @@ class LocalCpuDevice {
   final int freeMemoryBytes;
   final int totalMemoryBytes;
   final int logicalCores;
+  final double computeTops;
 
   const LocalCpuDevice({
     required this.name,
     required this.freeMemoryBytes,
     required this.totalMemoryBytes,
     required this.logicalCores,
+    this.computeTops = 0,
   });
 }
 
@@ -93,8 +102,11 @@ class _Phone {
 class ClusterService extends GetxService {
   final HiveService _hive = Get.find<HiveService>();
 
-  static bool get isSupported => !kIsWeb &&
-      (Platform.isAndroid || Platform.isIOS || Platform.isLinux ||
+  static bool get isSupported =>
+      !kIsWeb &&
+      (Platform.isAndroid ||
+          Platform.isIOS ||
+          Platform.isLinux ||
           Platform.isWindows);
 
   /// Running a model across workers is Android-only for now; iOS devices
@@ -104,13 +116,15 @@ class ClusterService extends GetxService {
 
   /// Linux & Windows use llama.cpp's native RPC server; phones use the
   /// plugin worker.
-  static bool get canBeWorker => !kIsWeb &&
-      (Platform.isAndroid || Platform.isIOS || Platform.isLinux ||
+  static bool get canBeWorker =>
+      !kIsWeb &&
+      (Platform.isAndroid ||
+          Platform.isIOS ||
+          Platform.isLinux ||
           Platform.isWindows);
 
   /// Linux & Windows desktop share the native plm_bridge engine.
-  static bool get isDesktopBridge =>
-      Platform.isLinux || Platform.isWindows;
+  static bool get isDesktopBridge => Platform.isLinux || Platform.isWindows;
 
   /// iOS can't stop the worker without closing the app.
   static bool get workerStopsWithApp => !kIsWeb && Platform.isIOS;
@@ -144,10 +158,15 @@ class ClusterService extends GetxService {
   final split = <ClusterShare>[].obs;
   final localGpuDevices = <LocalGpuDevice>[].obs;
   final localCpuDevice = Rxn<LocalCpuDevice>();
+  final freeStorageBytes = RxnInt();
+  final scheduleMode = 'smart'.obs;
+  final workerWeights = <String, double>{}.obs;
+  final localWeight = 100.0.obs;
 
   String deviceName = '';
   double? _localSpeed;
   Timer? _statusTimer;
+  Timer? _metricsTimer;
 
   ClusterRole get role => _workerRequested.value || worker.value.running
       ? ClusterRole.worker
@@ -172,6 +191,19 @@ class ClusterService extends GetxService {
     final saved =
         _hive.getSetting<List>(AppConstants.keyClusterWorkers) ?? const [];
     workers.assignAll(saved.whereType<Map>().map(ClusterWorker.fromMap));
+    scheduleMode.value =
+        _hive.getSetting<String>(AppConstants.keyClusterScheduleMode) ??
+            'smart';
+    localWeight.value =
+        (_hive.getSetting<num>(AppConstants.keyClusterLocalWeight) ?? 100)
+            .toDouble()
+            .clamp(0, 100);
+    final savedWeights =
+        _hive.getSetting<Map>(AppConstants.keyClusterWorkerWeights);
+    if (savedWeights != null) {
+      workerWeights.assignAll(savedWeights.map(
+          (key, value) => MapEntry(key.toString(), (value as num).toDouble())));
+    }
     if (isSupported) {
       if (Platform.isIOS) {
         DeviceInfoPlugin().iosInfo.then((info) => deviceName = info.modelName);
@@ -181,6 +213,8 @@ class ClusterService extends GetxService {
         deviceName = Platform.isWindows ? 'Windows desktop' : 'Linux desktop';
         refreshLocalGpuDevices();
         refreshLocalCpuDevice();
+        refreshLocalMetrics();
+        unawaited(refreshCpuBenchmark());
       }
       refreshWorkerStatus().then((_) {
         if (worker.value.running) _watchWorker();
@@ -230,7 +264,48 @@ class ClusterService extends GetxService {
       freeMemoryBytes: free,
       totalMemoryBytes: total,
       logicalCores: Platform.numberOfProcessors,
+      computeTops: localCpuDevice.value?.computeTops ?? 0,
     );
+  }
+
+  Future<void> refreshCpuBenchmark() async {
+    final cached = _hive.getSetting<num>(AppConstants.keyClusterCpuTops);
+    if (cached != null && cached > 0) {
+      final cpu = localCpuDevice.value;
+      if (cpu != null) {
+        localCpuDevice.value = LocalCpuDevice(
+          name: cpu.name,
+          freeMemoryBytes: cpu.freeMemoryBytes,
+          totalMemoryBytes: cpu.totalMemoryBytes,
+          logicalCores: cpu.logicalCores,
+          computeTops: cached.toDouble(),
+        );
+      }
+      return;
+    }
+    final stopwatch = Stopwatch()..start();
+    var value = 1.0;
+    const iterations = 3000000;
+    for (var i = 0; i < iterations; i++) {
+      value = value * 1.0000001 + i;
+    }
+    stopwatch.stop();
+    if (value.isNaN) return;
+    final seconds = stopwatch.elapsedMicroseconds / 1000000;
+    if (seconds <= 0) return;
+    final tops = iterations * 2 / seconds / 1000000000000;
+    await _hive.setSetting(AppConstants.keyClusterCpuTops, tops);
+    refreshLocalCpuDevice();
+    final cpu = localCpuDevice.value;
+    if (cpu != null) {
+      localCpuDevice.value = LocalCpuDevice(
+        name: cpu.name,
+        freeMemoryBytes: cpu.freeMemoryBytes,
+        totalMemoryBytes: cpu.totalMemoryBytes,
+        logicalCores: cpu.logicalCores,
+        computeTops: tops,
+      );
+    }
   }
 
   void setLocalGpuSelected(int index, bool selected) {
@@ -241,6 +316,24 @@ class ClusterService extends GetxService {
         localGpuDevices.where((d) => d.selected).map((d) => d.index).toList());
     localGpuDevices.refresh();
     unawaited(_saveGpuSelection());
+  }
+
+  Future<void> setScheduleMode(String mode) async {
+    if (mode != 'smart' && mode != 'manual') return;
+    scheduleMode.value = mode;
+    await _hive.setSetting(AppConstants.keyClusterScheduleMode, mode);
+  }
+
+  Future<void> setWorkerWeight(ClusterWorker worker, double weight) async {
+    workerWeights[worker.endpoint] = weight.clamp(0, 100);
+    workerWeights.refresh();
+    await _hive.setSetting(AppConstants.keyClusterWorkerWeights, workerWeights);
+  }
+
+  Future<void> setLocalWeight(double weight) async {
+    localWeight.value = weight.clamp(0, 100);
+    await _hive.setSetting(
+        AppConstants.keyClusterLocalWeight, localWeight.value);
   }
 
   void autoSelectLocalGpus() {
@@ -271,7 +364,26 @@ class ClusterService extends GetxService {
   @override
   void onClose() {
     _statusTimer?.cancel();
+    _metricsTimer?.cancel();
     super.onClose();
+  }
+
+  Future<void> refreshLocalMetrics() async {
+    try {
+      final result = await Process.run('df', ['-k', Directory.current.path],
+          runInShell: false);
+      if (result.exitCode != 0) return;
+      final lines = result.stdout.toString().trim().split('\n');
+      if (lines.length < 2) return;
+      final fields = lines.last.trim().split(RegExp(r'\s+'));
+      if (fields.length >= 4) {
+        freeStorageBytes.value = int.tryParse(fields[3]) == null
+            ? null
+            : int.parse(fields[3]) * 1024;
+      }
+    } catch (_) {
+      freeStorageBytes.value = null;
+    }
   }
 
   /// Android throttles a phone whose screen is off (slow cores, low CPU
@@ -581,7 +693,7 @@ class ClusterService extends GetxService {
 
     final modelMb = await File(modelPath).length() / (1024 * 1024);
     final needMb = modelMb * 1.1; // + KV cache and working buffers
-    _localSpeed ??= isDesktopBridge ? 4.0 : await LlamaCluster.benchmark();
+    _localSpeed ??= await _cachedBenchmark();
     // Free RAM: workers report theirs when they start. The master also runs
     // the app and the KV cache, so it offers less of its own.
     final localRamMb = isDesktopBridge
@@ -606,7 +718,7 @@ class ClusterService extends GetxService {
       await _clearCluster();
       return 0;
     }
-    if (needMb <= master.capacityMb) {
+    if (needMb <= master.capacityMb && scheduleMode.value == 'smart') {
       final share = await _askFitsHere(
           modelName ?? modelPath.split('/').last, modelMb, available.length);
       if (!share) {
@@ -614,6 +726,8 @@ class ClusterService extends GetxService {
         return 0;
       }
       _splitBySpeed(phones, needMb);
+    } else if (scheduleMode.value == 'manual') {
+      _splitByManualWeights(phones, needMb);
     } else {
       _fillFastestFirst(phones, needMb);
     }
@@ -659,6 +773,54 @@ class ClusterService extends GetxService {
       return LinuxLlamaEngine.freeRamBytes / (1024 * 1024);
     } catch (_) {
       return 4096;
+    }
+  }
+
+  Future<double> _cachedBenchmark() async {
+    if (isDesktopBridge) return 4.0;
+    final cached = _hive.getSetting<num>(AppConstants.keyClusterBenchmark);
+    if (cached != null && cached > 0) return cached.toDouble();
+    final measured = await LlamaCluster.benchmark();
+    if (measured > 0) {
+      await _hive.setSetting(AppConstants.keyClusterBenchmark, measured);
+    }
+    return measured > 0 ? measured : _unknownSpeed;
+  }
+
+  void _splitByManualWeights(List<_Phone> phones, double needMb) {
+    final selected = phones.where((p) {
+      final weight = p.worker == null
+          ? localWeight.value
+          : workerWeights[p.worker!.endpoint] ?? 0;
+      return weight > 0;
+    }).toList();
+    if (selected.isEmpty) {
+      _fillFastestFirst(phones, needMb);
+      return;
+    }
+    final totalWeight = selected.fold<double>(
+        0,
+        (sum, p) =>
+            sum +
+            (p.worker == null
+                ? localWeight.value
+                : workerWeights[p.worker!.endpoint] ?? 0));
+    var left = needMb;
+    for (final p in selected) {
+      final weight = p.worker == null
+          ? localWeight.value
+          : workerWeights[p.worker!.endpoint] ?? 0;
+      p.assignedMb = math.min(p.capacityMb, needMb * weight / totalWeight);
+      left -= p.assignedMb;
+    }
+    if (left > 0.5) {
+      final bySpeed = [...selected]..sort((a, b) => b.speed.compareTo(a.speed));
+      for (final p in bySpeed) {
+        final extra = math.min(p.capacityMb - p.assignedMb, left);
+        p.assignedMb += extra;
+        left -= extra;
+        if (left <= 0.5) break;
+      }
     }
   }
 

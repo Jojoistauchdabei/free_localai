@@ -22,6 +22,21 @@ class LanModelPeer {
   });
 }
 
+class LanModelTransfer {
+  final String filename;
+  final RxInt transferredBytes = 0.obs;
+  final RxInt totalBytes = 0.obs;
+  final RxDouble bytesPerSecond = 0.0.obs;
+  final RxString status = 'Starting…'.obs;
+  final DateTime startedAt = DateTime.now();
+
+  LanModelTransfer(this.filename);
+
+  double get progress => totalBytes.value <= 0
+      ? 0
+      : (transferredBytes.value / totalBytes.value).clamp(0, 1);
+}
+
 /// Shares downloaded model files with explicitly discovered devices on the
 /// local network. The discovery protocol is intentionally LAN-only.
 ///
@@ -38,6 +53,8 @@ class LanModelShareService extends GetxService {
   final DownloadService _downloads = Get.find<DownloadService>();
   final peers = <LanModelPeer>[].obs;
   final isScanning = false.obs;
+  final activeTransfers = <String, LanModelTransfer>{}.obs;
+  final transferredBytes = 0.obs;
 
   HttpServer? _server;
   RawDatagramSocket? _discovery;
@@ -75,11 +92,11 @@ class LanModelShareService extends GetxService {
       await _refreshLocalAddresses();
       _server = await HttpServer.bind(InternetAddress.anyIPv4, modelPort);
       _server!.listen(_handleRequest, onError: (_) {});
-      _discovery = await RawDatagramSocket.bind(
-          InternetAddress.anyIPv4, discoveryPort,
-          reuseAddress: true,
-          // reusePort is not supported on Windows.
-          reusePort: !Platform.isWindows);
+      _discovery =
+          await RawDatagramSocket.bind(InternetAddress.anyIPv4, discoveryPort,
+              reuseAddress: true,
+              // reusePort is not supported on Windows.
+              reusePort: !Platform.isWindows);
       _discovery!.broadcastEnabled = true;
       _discovery!.listen((event) {
         if (event != RawSocketEvent.read) return;
@@ -188,7 +205,8 @@ class LanModelShareService extends GetxService {
           .where(_isShareable)
           .toList();
       if (models.isEmpty) return;
-      _upsertPeer(LanModelPeer(host: ip, port: modelPort, name: ip, models: models));
+      _upsertPeer(
+          LanModelPeer(host: ip, port: modelPort, name: ip, models: models));
     } catch (_) {
       // Nothing reachable on this address.
     } finally {
@@ -201,8 +219,8 @@ class LanModelShareService extends GetxService {
       try {
         final client = HttpClient()
           ..connectionTimeout = const Duration(seconds: 2);
-        final request =
-            await client.getUrl(Uri.http('${peer.host}:${peer.port}', '/models'));
+        final request = await client
+            .getUrl(Uri.http('${peer.host}:${peer.port}', '/models'));
         final response = await request.close();
         if (response.statusCode != HttpStatus.ok) {
           await response.drain<void>();
@@ -236,9 +254,15 @@ class LanModelShareService extends GetxService {
 
   Future<String?> download(LanModelPeer peer, String filename) async {
     if (!_isShareable(filename)) return 'Invalid model filename';
+    if (activeTransfers.containsKey(filename))
+      return 'This model is already being copied';
     final uri = Uri.http('${peer.host}:${peer.port}', '/models/$filename');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
+    final transfer = LanModelTransfer(filename);
+    activeTransfers[filename] = transfer;
+    String? path;
+    var completed = false;
     try {
       final request = await client.getUrl(uri);
       final response = await request.close();
@@ -246,15 +270,39 @@ class LanModelShareService extends GetxService {
         await response.drain<void>();
         return 'Remote device returned HTTP ${response.statusCode}';
       }
-      final path = await _downloads.modelPath(filename);
+      transfer.totalBytes.value =
+          response.contentLength > 0 ? response.contentLength : 0;
+      transfer.status.value = 'Copying…';
+      path = await _downloads.modelPath(filename);
       final output = File(path).openWrite();
       try {
-        await response.pipe(output);
+        await for (final chunk in response) {
+          output.add(chunk);
+          transfer.transferredBytes.value += chunk.length;
+          transferredBytes.value += chunk.length;
+          final seconds =
+              DateTime.now().difference(transfer.startedAt).inMilliseconds /
+                  1000;
+          if (seconds > 0) {
+            transfer.bytesPerSecond.value =
+                transfer.transferredBytes.value / seconds;
+          }
+        }
       } finally {
         await output.close();
       }
+      completed = true;
+    } catch (e) {
+      transfer.status.value = 'Copy failed';
+      return 'Could not copy model: $e';
     } finally {
       client.close(force: true);
+      activeTransfers.remove(filename);
+      if (!completed && path != null) {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
     }
     try {
       Get.find<ModelController>().refreshDownloaded();
@@ -287,6 +335,7 @@ class LanModelShareService extends GetxService {
       }
       request.response.headers.contentType =
           ContentType('application', 'octet-stream');
+      request.response.contentLength = await file.length();
       await request.response.addStream(file.openRead());
       await request.response.close();
       return;

@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:ffi' show Abi;
 import 'dart:io' show Platform, Directory, File;
 import 'package:path_provider/path_provider.dart';
@@ -9,7 +9,9 @@ import 'inference_linux_engine.dart';
 
 /// Whether the current platform supports local inference.
 bool get supportsLocalInference =>
-    Platform.isAndroid || Platform.isIOS || Platform.isLinux ||
+    Platform.isAndroid ||
+    Platform.isIOS ||
+    Platform.isLinux ||
     Platform.isWindows;
 
 /// Linux and Windows desktop share the native plm_bridge engine.
@@ -46,8 +48,7 @@ class InferenceEngine {
   LlamaController? _controller;
   // Linux & Windows desktop: local GGUF via the plm_bridge library instead
   // of the llama_flutter_android method channel.
-  final LinuxLlamaEngine? _linux =
-      isDesktopBridge ? LinuxLlamaEngine() : null;
+  final LinuxLlamaEngine? _linux = isDesktopBridge ? LinuxLlamaEngine() : null;
   LiteLmEngine? _liteEngine;
   LiteLmConversation? _liteConversation;
   StreamSubscription? _subscription;
@@ -57,8 +58,7 @@ class InferenceEngine {
   bool _isLiteRt = false;
   // GGUF model loaded together with a working vision projector.
   bool _ggufVisionLoaded = false;
-  bool get ggufVisionLoaded =>
-      isDesktopBridge ? false : _ggufVisionLoaded;
+  bool get ggufVisionLoaded => isDesktopBridge ? false : _ggufVisionLoaded;
   bool _disposed = false;
   bool _hasLoadedModel = false;
   String? _liteConversationSystemPrompt;
@@ -168,22 +168,7 @@ class InferenceEngine {
     }
 
     // â”€â”€ Thread Tuning â”€â”€
-    int threads;
-    if (gpuLayers > 0) {
-      threads = deviceTier == 'ultra'
-          ? 4
-          : deviceTier == 'high'
-              ? 4
-              : 4;
-    } else {
-      threads = deviceTier == 'ultra'
-          ? 6
-          : deviceTier == 'high'
-              ? 5
-              : deviceTier == 'mid'
-                  ? 4
-                  : 3;
-    }
+    int threads = Platform.numberOfProcessors.clamp(1, 256);
 
     // Google Tensor SoC (Pixel 6/7/8) has known Q4_K_M dequant bugs
     // that corrupt logits at >1 thread on Gemma models. Force single-threaded
@@ -252,9 +237,9 @@ class InferenceEngine {
       }
     } catch (_) {}
 
-    // CPU threads: half the cores, capped to a sane range.
+    // Use all logical cores on desktop instead of silently capping at 12.
     final cores = Platform.numberOfProcessors;
-    final threads = cores <= 8 ? cores : (cores ~/ 2).clamp(4, 12);
+    final threads = cores.clamp(1, 256);
 
     if (mmprojPath != null) {
       print('[Inference] Linux bridge is text-only â€” mmproj ignored');

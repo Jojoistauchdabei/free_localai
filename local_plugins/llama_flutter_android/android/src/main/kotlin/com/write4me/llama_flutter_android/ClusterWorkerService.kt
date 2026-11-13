@@ -100,7 +100,17 @@ class ClusterWorkerService : Service() {
             // Measure before serving: free RAM and memory speed tell the
             // master how much to give this phone and how fast it runs.
             ramMb = availableRamMb(this)
-            bandwidth = ClusterNative.nativeMemBandwidth(threads)
+            val prefs = getSharedPreferences("cluster", Context.MODE_PRIVATE)
+            val cachedThreads = prefs.getInt("benchmark_threads", 0)
+            val cachedBandwidth = prefs.getFloat("benchmark_bandwidth", 0f)
+            bandwidth = if (cachedThreads == threads && cachedBandwidth > 0f) {
+                cachedBandwidth.toDouble()
+            } else {
+                ClusterNative.nativeMemBandwidth(threads).also {
+                    prefs.edit().putInt("benchmark_threads", threads)
+                        .putFloat("benchmark_bandwidth", it.toFloat()).apply()
+                }
+            }
             Log.i(TAG, "Worker: $threads threads, ${ramMb} MB free, %.1f GB/s".format(bandwidth))
             advertise(port)
             writeStatus("running")

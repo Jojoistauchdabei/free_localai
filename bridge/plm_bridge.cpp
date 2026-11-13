@@ -367,7 +367,7 @@ static void background_generate(std::vector<std::string> roles,
 
     std::vector<llama_token> tokens;
     try {
-        tokens = common_tokenize(g_ctx, params.prompt, false, true);
+        tokens = common_tokenize(g_ctx, params.prompt.str(), false, true);
     } catch (const std::exception &e) {
         set_gen_error(std::string("Tokenize failed: ") + e.what());
         g_gen_state = 3;

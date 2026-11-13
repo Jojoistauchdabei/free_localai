@@ -215,6 +215,9 @@ class _ClusterViewState extends State<ClusterView> {
 
   List<Widget> _masterSection(BuildContext context) {
     final t = AppTokens.of(context);
+    // Keep the scheduling card in the same observer as the rest of the
+    // master view so changing modes does not reparent nested reactive trees.
+    cluster.scheduleMode.value;
     return [
       _scheduleCard(context),
       const SizedBox(height: 16),
@@ -394,46 +397,45 @@ class _ClusterViewState extends State<ClusterView> {
     final sharing = Get.isRegistered<LanModelShareService>()
         ? Get.find<LanModelShareService>()
         : null;
-    return Obx(() => AppCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text('Master scheduling', style: t.bodyStrong),
-              const SizedBox(height: 4),
-              Text(
-                'Smart uses the fastest available devices. Manual lets you '
-                'exclude devices or assign their relative share.',
-                style: t.caption,
-              ),
-              const SizedBox(height: 10),
-              AppSegmented<String>(
-                items: const [('smart', 'Smart'), ('manual', 'Manual')],
-                selected: cluster.scheduleMode.value,
-                onChanged: cluster.setScheduleMode,
-              ),
-              if (cluster.scheduleMode.value == 'manual' &&
-                  cluster.workers.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                _weightRow(
-                  label: 'This PC',
-                  value: cluster.localWeight.value,
-                  onChanged: cluster.setLocalWeight,
-                ),
-                for (final worker in cluster.workers)
-                  _weightRow(
-                    label: worker.model ?? worker.name,
-                    value: cluster.workerWeights[worker.endpoint] ?? 0,
-                    onChanged: (value) =>
-                        cluster.setWorkerWeight(worker, value),
-                  ),
-              ],
-              const Divider(height: 20),
-              Text('Live cluster statistics', style: t.bodyStrong),
-              const SizedBox(height: 8),
-              _clusterStats(context, sharing),
-            ],
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Master scheduling', style: t.bodyStrong),
+          const SizedBox(height: 4),
+          Text(
+            'Smart uses the fastest available devices. Manual lets you '
+            'exclude devices or assign their relative share.',
+            style: t.caption,
           ),
-        ));
+          const SizedBox(height: 10),
+          AppSegmented<String>(
+            items: const [('smart', 'Smart'), ('manual', 'Manual')],
+            selected: cluster.scheduleMode.value,
+            onChanged: cluster.setScheduleMode,
+          ),
+          if (cluster.scheduleMode.value == 'manual' &&
+              cluster.workers.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _weightRow(
+              label: 'This PC',
+              value: cluster.localWeight.value,
+              onChanged: cluster.setLocalWeight,
+            ),
+            for (final worker in cluster.workers)
+              _weightRow(
+                label: worker.model ?? worker.name,
+                value: cluster.workerWeights[worker.endpoint] ?? 0,
+                onChanged: (value) => cluster.setWorkerWeight(worker, value),
+              ),
+          ],
+          const Divider(height: 20),
+          Text('Live cluster statistics', style: t.bodyStrong),
+          const SizedBox(height: 8),
+          _clusterStats(context, sharing),
+        ],
+      ),
+    );
   }
 
   String _shareFor(ClusterWorker worker) {

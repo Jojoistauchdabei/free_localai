@@ -78,7 +78,13 @@ set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
 set(GGML_RPC ON CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
-set(GGML_NATIVE ON CACHE BOOL "" FORCE)
+# GGML_NATIVE would bake the CI runner's instruction set (e.g. AVX-512) into
+# the binary, which crashes with illegal instructions on older CPUs (Haswell).
+# Ship Haswell+ (2013) portable: AVX2 / FMA / F16C.
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_AVX2 ON CACHE BOOL "" FORCE)
+set(GGML_FMA ON CACHE BOOL "" FORCE)
+set(GGML_F16C ON CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 add_subdirectory(${LLAMA_DIR} llama.cpp EXCLUDE_FROM_ALL)
 

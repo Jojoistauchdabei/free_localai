@@ -3,6 +3,9 @@
 
     <!-- Permissions for AI Chat -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- LAN model share: receive UDP discovery broadcasts -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />

@@ -16,6 +16,7 @@ import android.os.Looper
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.net.wifi.WifiManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -36,9 +37,21 @@ class MainActivity : FlutterActivity() {
     private var pendingImportResult: MethodChannel.Result? = null
     private var pendingModelsDir: String? = null
     private val monitoredInAppDownloads = ConcurrentHashMap.newKeySet<Long>()
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // UDP discovery broadcasts for LAN model share are dropped by the
+        // kernel multicast filter unless a multicast lock is held.
+        try {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            multicastLock = wifi.createMulticastLock("privatelm_lan_discovery").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Multicast lock unavailable: ${e.message}")
+        }
         importChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, importChannelName)
         importChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
@@ -225,6 +238,16 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+    }
+
+    override fun onDestroy() {
+        multicastLock?.let { lock ->
+            try {
+                if (lock.isHeld) lock.release()
+            } catch (_: Exception) {}
+        }
+        multicastLock = null
+        super.onDestroy()
     }
 
     private fun updatesDir(): File =

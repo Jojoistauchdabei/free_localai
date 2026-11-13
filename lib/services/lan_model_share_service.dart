@@ -24,6 +24,12 @@ class LanModelPeer {
 
 /// Shares downloaded model files with explicitly discovered devices on the
 /// local network. The discovery protocol is intentionally LAN-only.
+///
+/// Discovery works in two layers:
+/// 1. UDP broadcast announcements (fast when the Wi-Fi allows broadcasts).
+/// 2. Active TCP probing of the local /24 subnet on [modelPort], used as a
+///    fallback because broadcast reception is often blocked by Android
+///    multicast filtering, Windows Firewall, or Wi-Fi AP isolation.
 class LanModelShareService extends GetxService {
   static const modelPort = 50053;
   static const discoveryPort = 50054;
@@ -36,7 +42,7 @@ class LanModelShareService extends GetxService {
   HttpServer? _server;
   RawDatagramSocket? _discovery;
   Timer? _announceTimer;
-  String _localAddress = '';
+  List<String> _localAddresses = const [];
 
   bool get supported => !kIsWeb;
 
@@ -46,21 +52,34 @@ class LanModelShareService extends GetxService {
     if (supported) unawaited(start());
   }
 
-  Future<void> start() async {
-    if (_server != null || !supported) return;
+  Future<List<String>> _refreshLocalAddresses() async {
     try {
       final interfaces = await NetworkInterface.list(
           type: InternetAddressType.IPv4, includeLoopback: false);
-      final addresses = interfaces
+      _localAddresses = interfaces
           .expand((i) => i.addresses)
           .where((a) => !a.isLoopback)
+          .map((a) => a.address)
           .toList();
-      _localAddress = addresses.isEmpty ? '' : addresses.first.address;
+    } catch (_) {
+      _localAddresses = const [];
+    }
+    return _localAddresses;
+  }
+
+  bool _isSelf(String host) => _localAddresses.contains(host);
+
+  Future<void> start() async {
+    if (_server != null || !supported) return;
+    try {
+      await _refreshLocalAddresses();
       _server = await HttpServer.bind(InternetAddress.anyIPv4, modelPort);
       _server!.listen(_handleRequest, onError: (_) {});
       _discovery = await RawDatagramSocket.bind(
           InternetAddress.anyIPv4, discoveryPort,
-          reuseAddress: true);
+          reuseAddress: true,
+          // reusePort is not supported on Windows.
+          reusePort: !Platform.isWindows);
       _discovery!.broadcastEnabled = true;
       _discovery!.listen((event) {
         if (event != RawSocketEvent.read) return;
@@ -90,6 +109,12 @@ class LanModelShareService extends GetxService {
   Future<void> announce() async {
     final socket = _discovery;
     if (socket == null) return;
+    final targets = <InternetAddress>[const InternetAddress('255.255.255.255')];
+    for (final address in await _refreshLocalAddresses()) {
+      final parts = address.split('.');
+      if (parts.length != 4) continue;
+      targets.add(InternetAddress('${parts[0]}.${parts[1]}.${parts[2]}.255'));
+    }
     final files = await _downloads.getDownloadedModels();
     final payload = utf8.encode(jsonEncode({
       'type': _announce,
@@ -97,7 +122,11 @@ class LanModelShareService extends GetxService {
       'name': Platform.localHostname,
       'models': files.where(_isShareable).toList(),
     }));
-    socket.send(payload, InternetAddress('255.255.255.255'), discoveryPort);
+    for (final target in targets.toSet()) {
+      try {
+        socket.send(payload, target, discoveryPort);
+      } catch (_) {}
+    }
   }
 
   Future<void> scan() async {
@@ -106,16 +135,110 @@ class LanModelShareService extends GetxService {
     try {
       peers.clear();
       await announce();
+      // UDP broadcast is unreliable on many devices/networks; probe the
+      // subnet over TCP in parallel so discovery always works on the LAN.
+      await _probeSubnet();
+      // Give broadcast announcements a moment to arrive as well.
       await Future<void>.delayed(const Duration(seconds: 2));
+      // Merge newly discovered models into already-known peers.
+      await _refreshPeerModels();
     } finally {
       isScanning.value = false;
+    }
+  }
+
+  Future<void> _probeSubnet() async {
+    if (_localAddresses.isEmpty) await _refreshLocalAddresses();
+    final candidates = <String>{};
+    for (final address in _localAddresses) {
+      final parts = address.split('.');
+      if (parts.length != 4) continue;
+      for (var i = 1; i <= 254; i++) {
+        final ip = '${parts[0]}.${parts[1]}.${parts[2]}.$i';
+        if (ip == address) continue;
+        candidates.add(ip);
+      }
+    }
+    final list = candidates.toList();
+    const batchSize = 64;
+    for (var i = 0; i < list.length; i += batchSize) {
+      final batch = list.skip(i).take(batchSize);
+      await Future.wait(batch.map(_probe));
+      if (list.length > batchSize && i + batchSize < list.length) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
+  }
+
+  Future<void> _probe(String ip) async {
+    HttpClient? client;
+    try {
+      client = HttpClient()
+        ..connectionTimeout = const Duration(milliseconds: 700);
+      final request =
+          await client.getUrl(Uri.http('$ip:$modelPort', '/models'));
+      final response = await request.close();
+      if (response.statusCode != HttpStatus.ok) {
+        await response.drain<void>();
+        return;
+      }
+      final body = await response.transform(utf8.decoder).join();
+      final models = (jsonDecode(body) as List? ?? const [])
+          .whereType<String>()
+          .where(_isShareable)
+          .toList();
+      if (models.isEmpty) return;
+      _upsertPeer(LanModelPeer(host: ip, port: modelPort, name: ip, models: models));
+    } catch (_) {
+      // Nothing reachable on this address.
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  Future<void> _refreshPeerModels() async {
+    for (final peer in List<LanModelPeer>.from(peers)) {
+      try {
+        final client = HttpClient()
+          ..connectionTimeout = const Duration(seconds: 2);
+        final request =
+            await client.getUrl(Uri.http('${peer.host}:${peer.port}', '/models'));
+        final response = await request.close();
+        if (response.statusCode != HttpStatus.ok) {
+          await response.drain<void>();
+          client.close(force: true);
+          continue;
+        }
+        final body = await response.transform(utf8.decoder).join();
+        client.close(force: true);
+        final models = (jsonDecode(body) as List? ?? const [])
+            .whereType<String>()
+            .where(_isShareable)
+            .toList();
+        _upsertPeer(LanModelPeer(
+          host: peer.host,
+          port: peer.port,
+          name: peer.name,
+          models: models,
+        ));
+      } catch (_) {}
+    }
+  }
+
+  void _upsertPeer(LanModelPeer peer) {
+    final existing = peers.indexWhere((p) => p.host == peer.host);
+    if (existing >= 0) {
+      peers[existing] = peer;
+    } else {
+      peers.add(peer);
     }
   }
 
   Future<String?> download(LanModelPeer peer, String filename) async {
     if (!_isShareable(filename)) return 'Invalid model filename';
     final uri = Uri.http('${peer.host}:${peer.port}', '/models/$filename');
-    final client = HttpClient();
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
     try {
       final request = await client.getUrl(uri);
       final response = await request.close();
@@ -175,19 +298,17 @@ class LanModelShareService extends GetxService {
   void _recordAnnouncement(List<int> data, String host) {
     try {
       final json = jsonDecode(utf8.decode(data)) as Map<String, dynamic>;
-      if (json['type'] != _announce || host == _localAddress) return;
+      if (json['type'] != _announce || _isSelf(host)) return;
       final models = (json['models'] as List? ?? const [])
           .whereType<String>()
           .where(_isShareable)
           .toList();
-      final peer = LanModelPeer(
+      _upsertPeer(LanModelPeer(
         host: host,
         port: (json['port'] as num?)?.toInt() ?? modelPort,
         name: json['name'] as String? ?? host,
         models: models,
-      );
-      peers.removeWhere((p) => p.host == host);
-      peers.add(peer);
+      ));
     } catch (_) {}
   }
 

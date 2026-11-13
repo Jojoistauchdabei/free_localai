@@ -290,29 +290,31 @@ class _ClusterViewState extends State<ClusterView> {
           ),
         ),
       ],
-      if (cluster.localGpuDevices.isNotEmpty) ...[
+      if (cluster.localGpuDevices.isNotEmpty ||
+          cluster.localCpuDevice.value != null) ...[
         const SizedBox(height: 20),
-        SectionHeader('This PC: Vulkan devices'),
+        SectionHeader('Dieser PC · Geräte (eigene Worker)'),
         AppCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                'Each GPU is available separately. Auto mode chooses the '
-                'fastest device that can hold the model; select more devices '
-                'to distribute a larger model.',
+                'Jedes Gerät zählt als eigener Worker: dedizierte GPU, zweite '
+                'GPU, integrierte Grafik und CPU werden getrennt geführt. '
+                'Aktiviere mehrere Geräte, um ein Modell auf alle zu '
+                'verteilen.',
                 style: t.caption,
               ),
               const SizedBox(height: 8),
               Row(children: [
                 PillButton(
-                  label: 'Fastest only',
+                  label: 'Nur schnellste',
                   icon: Icons.speed_rounded,
                   onPressed: cluster.autoSelectLocalGpus,
                 ),
                 const SizedBox(width: 8),
                 PillButton(
-                  label: 'Use all',
+                  label: 'Alle',
                   icon: Icons.select_all_rounded,
                   onPressed: cluster.selectAllLocalGpus,
                 ),
@@ -324,33 +326,78 @@ class _ClusterViewState extends State<ClusterView> {
                   onChanged: (value) =>
                       cluster.setLocalGpuSelected(gpu.index, value ?? false),
                   contentPadding: EdgeInsets.zero,
-                  secondary: const Icon(Icons.memory_rounded),
-                  title: Text(gpu.name),
+                  secondary: Icon(gpu.isIntegrated
+                      ? Icons.developer_board_rounded
+                      : Icons.videogame_asset_rounded),
+                  title: Text(gpu.isIntegrated
+                      ? '${gpu.name} · integrierte Grafik'
+                      : gpu.name),
                   subtitle: Text(
-                    '${_gb(gpu.freeMemoryBytes / (1024 * 1024))} free of '
-                    '${_gb(gpu.totalMemoryBytes / (1024 * 1024))}'
-                    ' · ${gpu.totalMemoryBytes > 0 ? ((1 - gpu.freeMemoryBytes / gpu.totalMemoryBytes) * 100).round() : 0}% memory used'
-                    '${gpu.memorySpeedGbps > 0 ? ' · ${gpu.memorySpeedGbps.toStringAsFixed(1)} GB/s' : ''}',
+                    [
+                      '${_gb(gpu.freeMemoryBytes / (1024 * 1024))} frei von '
+                      '${_gb(gpu.totalMemoryBytes / (1024 * 1024))}'
+                      ' · ${gpu.totalMemoryBytes > 0 ? ((1 - gpu.freeMemoryBytes / gpu.totalMemoryBytes) * 100).round() : 0}% belegt',
+                      if (gpu.memorySpeedGbps > 0)
+                        '${gpu.memorySpeedGbps.toStringAsFixed(1)} GB/s',
+                      if (gpu.isIntegrated) 'nutzt System-RAM',
+                    ].join(' · '),
                   ),
                 ),
+              if (cluster.localCpuDevice.value != null) ...[
+                const Divider(height: 24),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.memory_rounded),
+                  title: Text(
+                      'CPU · ${cluster.localCpuDevice.value!.name}'),
+                  subtitle: Text(
+                    [
+                      'System-RAM gesamt: '
+                          '${_gb(cluster.localCpuDevice.value!.totalMemoryBytes / (1024 * 1024))}',
+                      if (cluster.localCpuDevice.value!.integratedGpuMemoryBytes >
+                          0)
+                        'davon integrierte Grafik: '
+                            '${_gb(cluster.localCpuDevice.value!.integratedGpuMemoryBytes / (1024 * 1024))} (abgezogen)',
+                      '${_gb(cluster.localCpuDevice.value!.usableMemoryBytes / (1024 * 1024))} für die CPU frei'
+                          ' · '
+                          '${cluster.localCpuDevice.value!.effectiveCores} von '
+                          '${cluster.localCpuDevice.value!.logicalCores} Kernen'
+                          ' · '
+                          '${cluster.localCpuDevice.value!.computeTops.toStringAsFixed(3)} TOPS',
+                    ].join('\n'),
+                  ),
+                ),
+                Row(children: [
+                  SizedBox(
+                    width: 110,
+                    child: Text(
+                      'CPU-Kerne: '
+                          '${cluster.localCpuDevice.value!.effectiveCores} / '
+                          '${cluster.localCpuDevice.value!.logicalCores}',
+                      style: t.caption,
+                    ),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: cluster.localCpuDevice.value!.effectiveCores
+                          .clamp(1, cluster.localCpuDevice.value!.logicalCores)
+                          .toDouble(),
+                      min: 1,
+                      max: cluster.localCpuDevice.value!.logicalCores
+                          .toDouble(),
+                      divisions:
+                          cluster.localCpuDevice.value!.logicalCores > 1
+                              ? cluster.localCpuDevice.value!.logicalCores - 1
+                              : null,
+                      label:
+                          '${cluster.localCpuDevice.value!.effectiveCores} Kerne',
+                      onChanged: (value) =>
+                          cluster.setCpuThreads(value.round()),
+                    ),
+                  ),
+                ]),
+              ],
             ],
-          ),
-        ),
-      ],
-      if (cluster.localCpuDevice.value != null) ...[
-        const SizedBox(height: 12),
-        AppCard(
-          child: ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.memory_rounded),
-            title: Text('CPU · ${cluster.localCpuDevice.value!.name}'),
-            subtitle: Text(
-              '${_gb(cluster.localCpuDevice.value!.freeMemoryBytes / (1024 * 1024))} '
-              'available of ${_gb(cluster.localCpuDevice.value!.totalMemoryBytes / (1024 * 1024))}'
-              ' · ${cluster.localCpuDevice.value!.logicalCores} threads'
-              ' · ${cluster.localCpuDevice.value!.computeTops.toStringAsFixed(3)} TOPS'
-              '\nShared RAM is counted once; the integrated GPU uses this same pool.',
-            ),
           ),
         ),
       ],
@@ -484,8 +531,9 @@ class _ClusterViewState extends State<ClusterView> {
         Text(
           [
             if (cpu != null)
-              'RAM frei ${(cpu.freeMemoryBytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB'
-                  ' · ${cpu.logicalCores} CPU-Threads',
+              'RAM frei ${(cpu.usableMemoryBytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB'
+                  '${cpu.integratedGpuMemoryBytes > 0 ? ' (ohne ${((cpu.integratedGpuMemoryBytes / 1024 / 1024 / 1024).toStringAsFixed(1))} GB iGPU)' : ''}'
+                  ' · ${cpu.effectiveCores} CPU-Kerne',
             if (gpuMemory > 0)
               'GPU frei ${(gpuMemory / 1024 / 1024 / 1024).toStringAsFixed(1)} GB',
             if (cluster.freeStorageBytes.value != null)

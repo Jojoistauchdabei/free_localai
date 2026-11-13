@@ -53,6 +53,10 @@ class LocalGpuDevice {
   final double memorySpeedGbps;
   final bool selected;
 
+  /// Integrated GPU: it doesn't have its own VRAM — its memory is system
+  /// RAM, shown and planned separately from the CPU's share.
+  final bool isIntegrated;
+
   const LocalGpuDevice({
     required this.index,
     required this.name,
@@ -60,6 +64,7 @@ class LocalGpuDevice {
     required this.totalMemoryBytes,
     required this.memorySpeedGbps,
     this.selected = true,
+    this.isIntegrated = false,
   });
 
   LocalGpuDevice copyWith({bool? selected}) => LocalGpuDevice(
@@ -69,23 +74,67 @@ class LocalGpuDevice {
         totalMemoryBytes: totalMemoryBytes,
         memorySpeedGbps: memorySpeedGbps,
         selected: selected ?? this.selected,
+        isIntegrated: isIntegrated,
       );
 }
 
 class LocalCpuDevice {
   final String name;
+
+  /// Free system RAM right now (everything the OS still has available).
   final int freeMemoryBytes;
+
+  /// The whole installed RAM, before any subtraction.
   final int totalMemoryBytes;
+
+  /// RAM the integrated GPU draws from the same physical pool; the CPU's
+  /// usable share is the rest.
+  final int integratedGpuMemoryBytes;
+
   final int logicalCores;
+
+  /// How many of [logicalCores] the user lets inference use.
+  final int allocatedCores;
+
   final double computeTops;
 
   const LocalCpuDevice({
     required this.name,
     required this.freeMemoryBytes,
     required this.totalMemoryBytes,
+    this.integratedGpuMemoryBytes = 0,
     required this.logicalCores,
+    this.allocatedCores = 0,
     this.computeTops = 0,
   });
+
+  /// RAM left for the CPU after the integrated GPU's share: the iGPU's
+  /// assigned RAM is subtracted from the main system RAM.
+  int get usableMemoryBytes =>
+      (freeMemoryBytes - integratedGpuMemoryBytes).clamp(0, freeMemoryBytes);
+
+  /// RAM visible to the CPU in total: full system RAM minus the iGPU's.
+  int get totalUsableMemoryBytes =>
+      (totalMemoryBytes - integratedGpuMemoryBytes)
+          .clamp(0, totalMemoryBytes);
+
+  int get effectiveCores =>
+      allocatedCores > 0 ? allocatedCores.clamp(1, logicalCores) : logicalCores;
+
+  LocalCpuDevice copyWith({
+    double? computeTops,
+    int? allocatedCores,
+    int? freeMemoryBytes,
+  }) =>
+      LocalCpuDevice(
+        name: name,
+        freeMemoryBytes: freeMemoryBytes ?? this.freeMemoryBytes,
+        totalMemoryBytes: totalMemoryBytes,
+        integratedGpuMemoryBytes: integratedGpuMemoryBytes,
+        logicalCores: logicalCores,
+        allocatedCores: allocatedCores ?? this.allocatedCores,
+        computeTops: computeTops ?? this.computeTops,
+      );
 }
 
 /// A phone the master can put layers on, for planning a load.
@@ -159,6 +208,9 @@ class ClusterService extends GetxService {
   final localGpuDevices = <LocalGpuDevice>[].obs;
   final localCpuDevice = Rxn<LocalCpuDevice>();
   final freeStorageBytes = RxnInt();
+
+  /// How many CPU cores this device's inference may use (0: all).
+  final cpuThreads = 0.obs;
   final scheduleMode = 'smart'.obs;
   final workerWeights = <String, double>{}.obs;
   final localWeight = 100.0.obs;
@@ -198,6 +250,8 @@ class ClusterService extends GetxService {
         (_hive.getSetting<num>(AppConstants.keyClusterLocalWeight) ?? 100)
             .toDouble()
             .clamp(0, 100);
+    cpuThreads.value =
+        _hive.getSetting<num>(AppConstants.keyClusterCpuThreads)?.toInt() ?? 0;
     final savedWeights =
         _hive.getSetting<Map>(AppConstants.keyClusterWorkerWeights);
     if (savedWeights != null) {
@@ -231,6 +285,7 @@ class ClusterService extends GetxService {
     if (!isDesktopBridge || !LinuxLlamaEngine.bridgeAvailable) return;
     final names = LinuxLlamaEngine.gpuNames;
     final speeds = LinuxLlamaEngine.gpuMemorySpeeds;
+    final integrated = LinuxLlamaEngine.gpuIntegrated;
     final savedSelection =
         _hive.getSetting<List>(AppConstants.keyClusterGpuSelection);
     final selectedIndices =
@@ -246,6 +301,7 @@ class ClusterService extends GetxService {
         memorySpeedGbps: speeds.length > i ? speeds[i] : 0,
         selected: old?.selected ??
             (selectedIndices == null || selectedIndices.contains(i)),
+        isIntegrated: i < integrated.length && integrated[i],
       ));
     }
 
@@ -259,13 +315,35 @@ class ClusterService extends GetxService {
     if (!isDesktopBridge) return;
     final total = LinuxLlamaEngine.totalRamBytes;
     final free = LinuxLlamaEngine.freeRamBytes;
+    // RAM the integrated GPUs draw from the same physical pool: their
+    // reported "VRAM" is really system RAM, subtracted from the CPU's share.
+    var igpuBytes = 0;
+    for (final gpu in localGpuDevices.where((d) => d.isIntegrated)) {
+      igpuBytes += gpu.totalMemoryBytes;
+    }
     localCpuDevice.value = LocalCpuDevice(
       name: LinuxLlamaEngine.cpuName,
       freeMemoryBytes: free,
       totalMemoryBytes: total,
+      integratedGpuMemoryBytes: igpuBytes,
       logicalCores: Platform.numberOfProcessors,
+      allocatedCores: cpuThreads.value,
       computeTops: localCpuDevice.value?.computeTops ?? 0,
     );
+  }
+
+  /// Sets how many CPU cores inference may use (0 = all). Applies to the
+  /// next model load and to this device's worker.
+  Future<void> setCpuThreads(int threads) async {
+    final cores = localCpuDevice.value?.logicalCores ??
+        (isDesktopBridge ? Platform.numberOfProcessors : 0);
+    cpuThreads.value = cores > 0 ? threads.clamp(0, cores) : 0;
+    await _hive.setSetting(AppConstants.keyClusterCpuThreads, cpuThreads.value);
+    final cpu = localCpuDevice.value;
+    if (cpu != null) {
+      localCpuDevice.value =
+          cpu.copyWith(allocatedCores: cpuThreads.value);
+    }
   }
 
   Future<void> refreshCpuBenchmark() async {
@@ -273,13 +351,7 @@ class ClusterService extends GetxService {
     if (cached != null && cached > 0) {
       final cpu = localCpuDevice.value;
       if (cpu != null) {
-        localCpuDevice.value = LocalCpuDevice(
-          name: cpu.name,
-          freeMemoryBytes: cpu.freeMemoryBytes,
-          totalMemoryBytes: cpu.totalMemoryBytes,
-          logicalCores: cpu.logicalCores,
-          computeTops: cached.toDouble(),
-        );
+        localCpuDevice.value = cpu.copyWith(computeTops: cached.toDouble());
       }
       return;
     }
@@ -298,13 +370,7 @@ class ClusterService extends GetxService {
     refreshLocalCpuDevice();
     final cpu = localCpuDevice.value;
     if (cpu != null) {
-      localCpuDevice.value = LocalCpuDevice(
-        name: cpu.name,
-        freeMemoryBytes: cpu.freeMemoryBytes,
-        totalMemoryBytes: cpu.totalMemoryBytes,
-        logicalCores: cpu.logicalCores,
-        computeTops: tops,
-      );
+      localCpuDevice.value = cpu.copyWith(computeTops: tops);
     }
   }
 
@@ -437,7 +503,9 @@ class ClusterService extends GetxService {
     if (isDesktopBridge) {
       _workerRequested.value = true;
       worker.value = const ClusterWorkerStatus(state: 'starting');
-      await LinuxLlamaEngine.startWorker();
+      // Serve the RPC worker with the configured CPU core count too.
+      await LinuxLlamaEngine.startWorker(
+          threads: cpuThreads.value > 0 ? cpuThreads.value : null);
       await Future.delayed(const Duration(milliseconds: 300));
       if (LinuxLlamaEngine.gpuNames.isNotEmpty) {
         deviceName =
@@ -695,9 +763,11 @@ class ClusterService extends GetxService {
     final needMb = modelMb * 1.1; // + KV cache and working buffers
     _localSpeed ??= await _cachedBenchmark();
     // Free RAM: workers report theirs when they start. The master also runs
-    // the app and the KV cache, so it offers less of its own.
+    // the app and the KV cache, so it offers less of its own. The integrated
+    // GPU's share of the same physical RAM is subtracted first.
     final localRamMb = isDesktopBridge
-        ? _linuxAvailableRamMb()
+        ? (localCpuDevice.value?.usableMemoryBytes.toDouble() ??
+            _linuxAvailableRamMb())
         : await LlamaCluster.localFreeRamMb();
     final master = _Phone(null, localRamMb * 0.7, _localSpeed!);
     final phones = [

@@ -39,6 +39,7 @@ typedef _GpuCountC = Int32 Function();
 typedef _GpuNameC = Pointer<ffi.Utf8> Function(Int32);
 typedef _GpuMemoryC = Uint64 Function(Int32);
 typedef _GpuSpeedC = Double Function(Int32);
+typedef _GpuIsIgpuC = Int32 Function(Int32);
 typedef _GpuSelectionC = Void Function(Pointer<Int32>, Int32);
 typedef _ProgressNative = Void Function(Float);
 typedef _LoadStartC = Int32 Function(Pointer<ffi.Utf8>, Pointer<ffi.Utf8>,
@@ -80,6 +81,7 @@ typedef _GpuCountD = int Function();
 typedef _GpuNameD = Pointer<ffi.Utf8> Function(int);
 typedef _GpuMemoryD = int Function(int);
 typedef _GpuSpeedD = double Function(int);
+typedef _GpuIsIgpuD = int Function(int);
 typedef _GpuSelectionD = void Function(Pointer<Int32>, int);
 typedef _LoadStartD = int Function(Pointer<ffi.Utf8>, Pointer<ffi.Utf8>, int,
     int, int, Pointer<NativeFunction<_ProgressNative>>);
@@ -136,6 +138,8 @@ class PlmBridge {
       _dylib.lookupFunction<_GpuMemoryC, _GpuMemoryD>('plm_gpu_total_memory');
   static _GpuSpeedD gpuMemorySpeed =
       _dylib.lookupFunction<_GpuSpeedC, _GpuSpeedD>('plm_gpu_memory_speed');
+  static _GpuIsIgpuD gpuIsIgpu =
+      _dylib.lookupFunction<_GpuIsIgpuC, _GpuIsIgpuD>('plm_gpu_is_igpu');
   static _GpuSelectionD setGpuSelection = _dylib
       .lookupFunction<_GpuSelectionC, _GpuSelectionD>('plm_set_gpu_selection');
   static _LoadStartD loadStart =
@@ -250,8 +254,24 @@ class LinuxLlamaEngine {
 
   static bool get workerRunning => PlmBridge.workerRunning() == 1;
 
-  static String get cpuName =>
-      Platform.localHostname.isEmpty ? 'PC CPU' : Platform.localHostname;
+  /// The real CPU model name ("AMD Ryzen 9 9900X …"), not the hostname.
+  static String get cpuName {
+    if (Platform.isLinux) {
+      try {
+        final cpuinfo = File('/proc/cpuinfo').readAsStringSync();
+        for (final line in cpuinfo.split('\n')) {
+          if (line.startsWith('model name')) {
+            final colon = line.indexOf(':');
+            if (colon > 0) {
+              final name = line.substring(colon + 1).trim();
+              if (name.isNotEmpty) return name;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    return Platform.localHostname.isEmpty ? 'PC CPU' : Platform.localHostname;
+  }
 
   static List<String> get gpuNames => [
         for (var i = 0; i < PlmBridge.gpuCount(); i++)
@@ -273,6 +293,13 @@ class LinuxLlamaEngine {
   static List<double> get gpuMemorySpeeds => [
         for (var i = 0; i < PlmBridge.gpuCount(); i++)
           PlmBridge.gpuMemorySpeed(i),
+      ];
+
+  /// true per device when it is an integrated GPU: its "VRAM" is really
+  /// system RAM, so the CPU's share of RAM is the rest.
+  static List<bool> get gpuIntegrated => [
+        for (var i = 0; i < PlmBridge.gpuCount(); i++)
+          PlmBridge.gpuIsIgpu(i) == 1,
       ];
 
   static void setGpuSelection(List<int> indices) {

@@ -62,6 +62,8 @@ static std::vector<std::string> g_gpu_names;
 static std::vector<size_t> g_gpu_free;
 static std::vector<size_t> g_gpu_total;
 static std::vector<double> g_gpu_speed;
+// true when the device is an integrated GPU (its memory is system RAM).
+static std::vector<bool> g_gpu_is_igpu;
 static std::mutex g_gpu_selection_mutex;
 static std::unordered_set<int> g_gpu_selection;
 
@@ -189,14 +191,21 @@ static void refresh_gpu_info() {
     g_gpu_free.clear();
     g_gpu_total.clear();
     g_gpu_speed.clear();
+    g_gpu_is_igpu.clear();
     for (auto device : gpu_devices()) {
         size_t free = 0;
         size_t total = 0;
         ggml_backend_dev_memory(device, &free, &total);
-        g_gpu_names.emplace_back(ggml_backend_dev_name(device));
+        // dev_name() is just "Vulkan0" etc.; dev_description() carries the
+        // real card name ("AMD Radeon RX 5700 XT …").
+        const char *desc = ggml_backend_dev_description(device);
+        g_gpu_names.emplace_back(desc && *desc ? desc
+                                               : ggml_backend_dev_name(device));
         g_gpu_free.push_back(free);
         g_gpu_total.push_back(total);
         g_gpu_speed.push_back(benchmark_gpu(device));
+        g_gpu_is_igpu.push_back(ggml_backend_dev_type(device) ==
+                                GGML_BACKEND_DEVICE_TYPE_IGPU);
     }
 }
 
@@ -554,6 +563,17 @@ double plm_gpu_memory_speed(int index) {
     return index >= 0 && (size_t)index < g_gpu_speed.size()
                ? g_gpu_speed[index]
                : 0.0;
+}
+
+// 1 when the device is an integrated GPU whose memory comes out of system
+// RAM (so that RAM must be subtracted from the CPU's share), else 0.
+int plm_gpu_is_igpu(int index) {
+    refresh_gpu_info();
+    std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
+    return index >= 0 && (size_t)index < g_gpu_is_igpu.size() &&
+                   g_gpu_is_igpu[index]
+               ? 1
+               : 0;
 }
 
 // Starts an async model load. Returns 0 on success (poll plm_load_state),

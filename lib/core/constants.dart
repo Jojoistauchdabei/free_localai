@@ -71,6 +71,7 @@ class AppConstants {
   static const String keyClusterWorkerWeights = 'cluster_worker_weights';
   static const String keyClusterLocalWeight = 'cluster_local_weight';
   static const String keyClusterCpuTops = 'cluster_cpu_tops';
+  static const String keyClusterCpuThreads = 'cluster_cpu_threads';
   static const String keyClusterBenchmark = 'cluster_benchmark';
   static const String keyImageSteps = 'image_steps';
   static const String keyImageGenForceCpu = 'image_gen_force_cpu';

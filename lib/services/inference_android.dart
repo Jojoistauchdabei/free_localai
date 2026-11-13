@@ -3,8 +3,10 @@ import 'dart:ffi' show Abi;
 import 'dart:io' show Platform, Directory, File;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_litert_lm/flutter_litert_lm.dart';
+import 'package:get/get.dart';
 import 'package:llama_flutter_android/llama_flutter_android.dart';
 
+import 'cluster_service.dart';
 import 'inference_linux_engine.dart';
 
 /// Whether the current platform supports local inference.
@@ -237,9 +239,13 @@ class InferenceEngine {
       }
     } catch (_) {}
 
-    // Use all logical cores on desktop instead of silently capping at 12.
-    final cores = Platform.numberOfProcessors;
-    final threads = cores.clamp(1, 256);
+    // Respect the core count configured in the cluster view (0 = all).
+    var threads = Platform.numberOfProcessors;
+    try {
+      final configured = Get.find<ClusterService>().cpuThreads.value;
+      if (configured > 0) threads = configured;
+    } catch (_) {}
+    threads = threads.clamp(1, 256);
 
     if (mmprojPath != null) {
       print('[Inference] Linux bridge is text-only â€” mmproj ignored');

@@ -122,7 +122,7 @@ jobs:
 
   windows:
     name: Windows desktop bundle
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Check out source and submodules
         uses: actions/checkout@v4

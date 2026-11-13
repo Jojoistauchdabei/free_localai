@@ -20,6 +20,12 @@ subprojects {
 }
 
 subprojects {
+    if (project.name == "file_picker") {
+        apply(plugin = "org.jetbrains.kotlin.android")
+    }
+}
+
+subprojects {
     if (project.name != "app") {
         afterEvaluate {
             tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {

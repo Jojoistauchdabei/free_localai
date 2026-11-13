@@ -114,11 +114,40 @@ jobs:
           flutter build linux --release
           tar -C build/linux/x64/release -czf privatelm-linux-x64.tar.gz bundle
 
+      - name: Package Linux AppImage
+        run: |
+          set -euxo pipefail
+          app_dir="$PWD/AppDir"
+          mkdir -p "$app_dir/usr/bin" \
+            "$app_dir/usr/share/applications" \
+            "$app_dir/usr/share/icons/hicolor/512x512/apps"
+          cp -a build/linux/x64/release/bundle/. "$app_dir/usr/bin/"
+          cp assets/icons/appicon.png \
+            "$app_dir/usr/share/icons/hicolor/512x512/apps/privatelm.png"
+          cat > "$app_dir/usr/share/applications/privatelm.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=PrivateLM
+          Comment=Local and cloud LLM assistant
+          Exec=privatelm
+          Icon=privatelm
+          Categories=Utility;
+          Terminal=false
+          EOF
+          curl --fail --location --retry 5 \
+            --output appimagetool.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
+            ./appimagetool.AppImage "$app_dir" privatelm-linux-x86_64.AppImage
+
       - name: Upload Linux package
         uses: actions/upload-artifact@v4
         with:
           name: linux-package
-          path: privatelm-linux-x64.tar.gz
+          path: |
+            privatelm-linux-x64.tar.gz
+            privatelm-linux-x86_64.AppImage
 
   windows:
     name: Windows desktop bundle
@@ -188,4 +217,5 @@ jobs:
             release/app-release.apk
             release/app-release.aab
             release/privatelm-linux-x64.tar.gz
+            release/privatelm-linux-x86_64.AppImage
             release/privatelm-windows-x64.zip

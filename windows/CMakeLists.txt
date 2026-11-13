@@ -90,6 +90,8 @@ target_include_directories(plm_bridge PRIVATE
 target_compile_features(plm_bridge PRIVATE cxx_std_20)
 target_link_libraries(plm_bridge PRIVATE llama llama-common ggml ggml-rpc)
 target_compile_options(plm_bridge PRIVATE /W2 /WX- /EHsc /O2)
+# Export the plm_* C-ABI symbols (MSVC hides everything by default).
+set_target_properties(plm_bridge PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 
 # === Installation ===

@@ -563,7 +563,7 @@ class LinuxLlamaEngine {
 }
 
 /// MEMORYSTATUS layout (GlobalMemoryStatusEx, kernel32).
-class _MemoryStatusEx extends Struct {
+base class _MemoryStatusEx extends Struct {
   @Uint32()
   external int dwLength;
   @Uint32()

@@ -137,6 +137,8 @@ jobs:
           cache: true
 
       - name: Build Windows bundle
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: '3.5'
         run: |
           flutter pub get
           flutter build windows --release

@@ -109,7 +109,7 @@ class LanModelShareService extends GetxService {
   Future<void> announce() async {
     final socket = _discovery;
     if (socket == null) return;
-    final targets = <InternetAddress>[const InternetAddress('255.255.255.255')];
+    final targets = <InternetAddress>[InternetAddress('255.255.255.255')];
     for (final address in await _refreshLocalAddresses()) {
       final parts = address.split('.');
       if (parts.length != 4) continue;

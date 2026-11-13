@@ -38,13 +38,16 @@ extensions.configure<ApplicationExtension> {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
-    packaging {
-        jniLibs {
-            // llama.cpp armv9 (SVE2/SME) CPU variants abort on some phones
-            // (Pixel 8); the loader never picks them, so don't ship them.
-            excludes += setOf("**/libggml-cpu-android_armv9*.so")
+        packaging {
+            jniLibs {
+                // llama.cpp armv9 (SVE2/SME) CPU variants abort on some phones
+                // (Pixel 8); the loader never picks them, so don't ship them.
+                excludes += setOf("**/libggml-cpu-android_armv9*.so")
+                // Keep native libs uncompressed on disk (legacy behavior);
+                // AGP 9 requires this flag instead of extractNativeLibs.
+                useLegacyPackaging = true
+            }
         }
-    }
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true

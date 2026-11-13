@@ -124,7 +124,8 @@ jobs:
           cp -a build/linux/x64/release/bundle/. "$app_dir/usr/bin/"
           cp assets/icons/appicon.png \
             "$app_dir/usr/share/icons/hicolor/512x512/apps/privatelm.png"
-          cat > "$app_dir/usr/share/applications/privatelm.desktop" <<'EOF'
+          cp assets/icons/appicon.png "$app_dir/privatelm.png"
+          cat > "$app_dir/privatelm.desktop" <<'EOF'
           [Desktop Entry]
           Type=Application
           Name=PrivateLM

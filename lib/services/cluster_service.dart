@@ -93,17 +93,24 @@ class _Phone {
 class ClusterService extends GetxService {
   final HiveService _hive = Get.find<HiveService>();
 
-  static bool get isSupported =>
-      !kIsWeb && (Platform.isAndroid || Platform.isIOS || Platform.isLinux);
+  static bool get isSupported => !kIsWeb &&
+      (Platform.isAndroid || Platform.isIOS || Platform.isLinux ||
+          Platform.isWindows);
 
   /// Running a model across workers is Android-only for now; iOS devices
   /// can be workers (their GPU serves a master's layers).
   static bool get canBeMaster =>
-      !kIsWeb && (Platform.isAndroid || Platform.isLinux);
+      !kIsWeb && (Platform.isAndroid || Platform.isLinux || Platform.isWindows);
 
-  /// Linux uses llama.cpp's native RPC server; phones use the plugin worker.
-  static bool get canBeWorker =>
-      !kIsWeb && (Platform.isAndroid || Platform.isIOS || Platform.isLinux);
+  /// Linux & Windows use llama.cpp's native RPC server; phones use the
+  /// plugin worker.
+  static bool get canBeWorker => !kIsWeb &&
+      (Platform.isAndroid || Platform.isIOS || Platform.isLinux ||
+          Platform.isWindows);
+
+  /// Linux & Windows desktop share the native plm_bridge engine.
+  static bool get isDesktopBridge =>
+      Platform.isLinux || Platform.isWindows;
 
   /// iOS can't stop the worker without closing the app.
   static bool get workerStopsWithApp => !kIsWeb && Platform.isIOS;
@@ -171,7 +178,7 @@ class ClusterService extends GetxService {
       } else if (Platform.isAndroid) {
         DeviceInfoPlugin().androidInfo.then((info) => deviceName = info.model);
       } else {
-        deviceName = 'Linux desktop';
+        deviceName = Platform.isWindows ? 'Windows desktop' : 'Linux desktop';
         refreshLocalGpuDevices();
         refreshLocalCpuDevice();
       }
@@ -187,7 +194,7 @@ class ClusterService extends GetxService {
   }
 
   Future<void> refreshLocalGpuDevices() async {
-    if (!Platform.isLinux || !LinuxLlamaEngine.bridgeAvailable) return;
+    if (!isDesktopBridge || !LinuxLlamaEngine.bridgeAvailable) return;
     final names = LinuxLlamaEngine.gpuNames;
     final speeds = LinuxLlamaEngine.gpuMemorySpeeds;
     final savedSelection =
@@ -215,9 +222,9 @@ class ClusterService extends GetxService {
   }
 
   void refreshLocalCpuDevice() {
-    if (!Platform.isLinux) return;
-    final total = _linuxTotalRamBytes();
-    final free = _linuxFreeRamBytes();
+    if (!isDesktopBridge) return;
+    final total = LinuxLlamaEngine.totalRamBytes;
+    final free = LinuxLlamaEngine.freeRamBytes;
     localCpuDevice.value = LocalCpuDevice(
       name: LinuxLlamaEngine.cpuName,
       freeMemoryBytes: free,
@@ -276,7 +283,7 @@ class ClusterService extends GetxService {
     final on = s.running || s.starting || serving.value;
     if (on == _screenKeptOn) return;
     _screenKeptOn = on;
-    if (!Platform.isLinux) {
+    if (Platform.isAndroid || Platform.isIOS) {
       LlamaCluster.setKeepScreenOn(on).catchError((_) {});
     }
   }
@@ -315,22 +322,23 @@ class ClusterService extends GetxService {
 
   Future<void> startWorker() async {
     if (!canBeWorker) return;
-    if (Platform.isLinux) {
+    if (isDesktopBridge) {
       _workerRequested.value = true;
       worker.value = const ClusterWorkerStatus(state: 'starting');
       await LinuxLlamaEngine.startWorker();
       await Future.delayed(const Duration(milliseconds: 300));
       if (LinuxLlamaEngine.gpuNames.isNotEmpty) {
-        deviceName = 'Linux desktop · ${LinuxLlamaEngine.gpuNames.join(' + ')}';
+        deviceName =
+            '${Platform.isWindows ? 'Windows' : 'Linux'} desktop · ${LinuxLlamaEngine.gpuNames.join(' + ')}';
       }
       worker.value = ClusterWorkerStatus(
         state: LinuxLlamaEngine.workerRunning ? 'running' : 'error',
         error: LinuxLlamaEngine.workerRunning
             ? null
-            : 'Could not start the Linux RPC worker',
+            : 'Could not start the desktop RPC worker',
         ramMb: _linuxAvailableRamMb().round(),
         bandwidth: 4.0,
-        id: 'linux-${deviceName.hashCode}',
+        id: 'desktop-${deviceName.hashCode}',
       );
       return;
     }
@@ -350,7 +358,7 @@ class ClusterService extends GetxService {
   Future<void> stopWorker() async {
     _workerRequested.value = false;
     _statusTimer?.cancel();
-    if (Platform.isLinux) {
+    if (isDesktopBridge) {
       await LinuxLlamaEngine.stopWorker();
       worker.value = const ClusterWorkerStatus(state: 'stopped');
       return;
@@ -377,7 +385,7 @@ class ClusterService extends GetxService {
   }
 
   Future<void> refreshWorkerStatus() async {
-    if (Platform.isLinux) {
+    if (isDesktopBridge) {
       worker.value = const ClusterWorkerStatus(state: 'stopped');
       return;
     }
@@ -395,7 +403,7 @@ class ClusterService extends GetxService {
     try {
       final interfaces =
           await NetworkInterface.list(type: InternetAddressType.IPv4);
-      final wifi = Platform.isLinux
+      final wifi = Platform.isLinux || Platform.isWindows
           ? interfaces.where((i) => !i.name.startsWith('lo'))
           : interfaces
               .where((i) => i.name.startsWith('wlan') || i.name == 'en0');
@@ -458,7 +466,7 @@ class ClusterService extends GetxService {
       if (!await _probe(w.endpoint)) missing.add(w);
     }
     if (missing.isEmpty) return const [];
-    if (Platform.isLinux) return missing;
+    if (isDesktopBridge) return missing;
     final seen = await LlamaCluster.discover();
     var moved = 0;
     final unreachable = <ClusterWorker>[];
@@ -504,7 +512,7 @@ class ClusterService extends GetxService {
     if (isScanning.value) return;
     isScanning.value = true;
     try {
-      if (Platform.isLinux) {
+      if (isDesktopBridge) {
         found.clear();
         return;
       }
@@ -516,7 +524,7 @@ class ClusterService extends GetxService {
   }
 
   Future<bool> _probe(String endpoint) async {
-    if (!Platform.isLinux) return LlamaCluster.probe(endpoint);
+    if (!isDesktopBridge) return LlamaCluster.probe(endpoint);
     final separator = endpoint.lastIndexOf(':');
     final host = separator > 0 ? endpoint.substring(0, separator) : '';
     final port =
@@ -573,10 +581,10 @@ class ClusterService extends GetxService {
 
     final modelMb = await File(modelPath).length() / (1024 * 1024);
     final needMb = modelMb * 1.1; // + KV cache and working buffers
-    _localSpeed ??= Platform.isLinux ? 4.0 : await LlamaCluster.benchmark();
+    _localSpeed ??= isDesktopBridge ? 4.0 : await LlamaCluster.benchmark();
     // Free RAM: workers report theirs when they start. The master also runs
     // the app and the KV cache, so it offers less of its own.
-    final localRamMb = Platform.isLinux
+    final localRamMb = isDesktopBridge
         ? _linuxAvailableRamMb()
         : await LlamaCluster.localFreeRamMb();
     final master = _Phone(null, localRamMb * 0.7, _localSpeed!);
@@ -617,7 +625,7 @@ class ClusterService extends GetxService {
       return 0;
     }
     try {
-      if (Platform.isLinux) {
+      if (isDesktopBridge) {
         LinuxLlamaEngine.setCluster(
           [for (final p in used) p.worker!.endpoint],
           [for (final p in used) p.assignedMb],
@@ -639,7 +647,7 @@ class ClusterService extends GetxService {
   }
 
   Future<void> _clearCluster() async {
-    if (Platform.isLinux) {
+    if (isDesktopBridge) {
       LinuxLlamaEngine.setCluster(const [], const [], 1.0);
     } else {
       await LlamaCluster.clear();
@@ -648,29 +656,9 @@ class ClusterService extends GetxService {
 
   double _linuxAvailableRamMb() {
     try {
-      return _linuxFreeRamBytes() / (1024 * 1024);
+      return LinuxLlamaEngine.freeRamBytes / (1024 * 1024);
     } catch (_) {
       return 4096;
-    }
-  }
-
-  int _linuxFreeRamBytes() {
-    final text = File('/proc/meminfo').readAsStringSync();
-    final line =
-        text.split('\n').firstWhere((line) => line.startsWith('MemAvailable:'));
-    final kb = int.tryParse(line.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-    return kb * 1024;
-  }
-
-  int _linuxTotalRamBytes() {
-    try {
-      final text = File('/proc/meminfo').readAsStringSync();
-      final line =
-          text.split('\n').firstWhere((line) => line.startsWith('MemTotal:'));
-      final kb = int.tryParse(line.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
-      return kb * 1024;
-    } catch (_) {
-      return 0;
     }
   }
 

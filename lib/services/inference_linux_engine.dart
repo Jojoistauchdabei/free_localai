@@ -13,7 +13,11 @@ import 'package:ffi/ffi.dart' as ffi;
 import 'package:llama_flutter_android/llama_flutter_android.dart'
     show ChatMessage, ContextInfo, GpuInfo;
 
-const String kBridgeLibrary = 'libplm_bridge.so';
+const String kBridgeLibraryWindows = 'plm_bridge.dll';
+const String kBridgeLibraryPosix = 'libplm_bridge.so';
+
+String get kBridgeLibrary =>
+    Platform.isWindows ? kBridgeLibraryWindows : kBridgeLibraryPosix;
 
 DynamicLibrary? _cachedDylib;
 
@@ -473,8 +477,29 @@ class LinuxLlamaEngine {
 
   static int get totalGpuMemoryBytes => gpuTotalMemoryBytes;
 
+  /// Free physical RAM on Linux and Windows.
+  static int get freeRamBytes => _freeRamBytes();
+
+  /// Total physical RAM on Linux and Windows, 0 when it can't be read.
+  static int get totalRamBytes =>
+      Platform.isWindows ? _windowsTotalRamBytes() : _totalRamBytes();
+
+  static int _totalRamBytes() {
+    try {
+      final meminfo = File('/proc/meminfo').readAsStringSync();
+      for (final line in meminfo.split('\n')) {
+        if (line.startsWith('MemTotal:')) {
+          final kb = int.parse(line.replaceAll(RegExp('[^0-9]'), ''));
+          return kb * 1024;
+        }
+      }
+    } catch (_) {}
+    return 0;
+  }
+
   static int _freeRamBytes() {
     try {
+      if (Platform.isWindows) return _windowsAvailableRamBytes();
       final meminfo = File('/proc/meminfo').readAsStringSync();
       for (final line in meminfo.split('\n')) {
         if (line.startsWith('MemAvailable:')) {
@@ -486,6 +511,46 @@ class LinuxLlamaEngine {
     return 0;
   }
 
+  /// Windows: GlobalMemoryStatusEx over the kernel32 FFI.
+  static int _windowsAvailableRamBytes() {
+    final kernel32 = DynamicLibrary.open('kernel32.dll');
+
+    final memoryStatus = ffi.calloc<Uint8>(64);
+    final view = memoryStatus.cast<_MemoryStatusEx>();
+    view.ref.dwLength = 64;
+
+    final globalMemoryStatusEx = kernel32.lookupFunction<
+        Int32 Function(Pointer<_MemoryStatusEx>),
+        int Function(Pointer<_MemoryStatusEx>)>('GlobalMemoryStatusEx');
+    if (globalMemoryStatusEx(view) == 0) {
+      ffi.calloc.free(memoryStatus);
+      return 0;
+    }
+    final avail = view.ref.ullAvailPhys;
+    ffi.calloc.free(memoryStatus);
+    return avail;
+  }
+
+  /// Windows: total physical RAM, 0 when it can't be read.
+  static int _windowsTotalRamBytes() {
+    final kernel32 = DynamicLibrary.open('kernel32.dll');
+
+    final memoryStatus = ffi.calloc<Uint8>(64);
+    final view = memoryStatus.cast<_MemoryStatusEx>();
+    view.ref.dwLength = 64;
+
+    final globalMemoryStatusEx = kernel32.lookupFunction<
+        Int32 Function(Pointer<_MemoryStatusEx>),
+        int Function(Pointer<_MemoryStatusEx>)>('GlobalMemoryStatusEx');
+    if (globalMemoryStatusEx(view) == 0) {
+      ffi.calloc.free(memoryStatus);
+      return 0;
+    }
+    final total = view.ref.ullTotalPhys;
+    ffi.calloc.free(memoryStatus);
+    return total;
+  }
+
   Future<void> dispose() async {
     _loadTimer?.cancel();
     _genTimer?.cancel();
@@ -495,4 +560,26 @@ class LinuxLlamaEngine {
       PlmBridge.free();
     } catch (_) {}
   }
+}
+
+/// MEMORYSTATUS layout (GlobalMemoryStatusEx, kernel32).
+class _MemoryStatusEx extends Struct {
+  @Uint32()
+  external int dwLength;
+  @Uint32()
+  external int dwMemoryLoad;
+  @Uint64()
+  external int ullTotalPhys;
+  @Uint64()
+  external int ullAvailPhys;
+  @Uint64()
+  external int ullTotalPageFile;
+  @Uint64()
+  external int ullAvailPageFile;
+  @Uint64()
+  external int ullTotalVirtual;
+  @Uint64()
+  external int ullAvailVirtual;
+  @Uint64()
+  external int ullAvailExtendedVirtual;
 }

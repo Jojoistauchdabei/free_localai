@@ -120,9 +120,37 @@ jobs:
           name: linux-package
           path: privatelm-linux-x64.tar.gz
 
+  windows:
+    name: Windows desktop bundle
+    runs-on: windows-latest
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Build Windows bundle
+        run: |
+          flutter pub get
+          flutter build windows --release
+          Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath privatelm-windows-x64.zip -Force
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: privatelm-windows-x64.zip
+
   publish:
     name: Publish GitHub release
-    needs: [android, linux]
+    needs: [android, linux, windows]
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     steps:
@@ -136,6 +164,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: linux-package
+          path: release
+
+      - name: Download Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-package
           path: release
 
       - name: Normalize release filenames
@@ -152,3 +186,4 @@ jobs:
             release/app-release.apk
             release/app-release.aab
             release/privatelm-linux-x64.tar.gz
+            release/privatelm-windows-x64.zip

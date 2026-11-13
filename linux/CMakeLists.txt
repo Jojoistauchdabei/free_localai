@@ -76,8 +76,9 @@ set_target_properties(${BINARY_NAME}
 include(flutter/generated_plugins.cmake)
 
 # === PrivateLM Linux llama.cpp backend ===
-# Builds the vendored llama.cpp plus the small C-ABI bridge (linux/bridge/)
-# that lib/services/inference_linux_engine.dart loads via dart:ffi.
+# Builds the vendored llama.cpp plus the small C-ABI bridge (bridge/
+# plm_bridge.cpp, shared with the Windows build) that
+# lib/services/inference_linux_engine.dart loads via dart:ffi.
 set(LLAMA_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../local_plugins/llama_flutter_android/android/src/main/cpp/llama.cpp")
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -105,7 +106,7 @@ foreach(_llama_target llama llama-common ggml ggml-base ggml-cpu)
   target_compile_options(${_llama_target} PRIVATE -O3)
 endforeach()
 
-add_library(plm_bridge SHARED bridge/plm_bridge.cpp)
+add_library(plm_bridge SHARED ../bridge/plm_bridge.cpp)
 target_include_directories(plm_bridge PRIVATE
   ${LLAMA_DIR}/include
   ${LLAMA_DIR}/common

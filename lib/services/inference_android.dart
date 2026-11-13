@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:ffi' show Abi;
 import 'dart:io' show Platform, Directory, File;
 import 'package:path_provider/path_provider.dart';
@@ -9,7 +9,11 @@ import 'inference_linux_engine.dart';
 
 /// Whether the current platform supports local inference.
 bool get supportsLocalInference =>
-    Platform.isAndroid || Platform.isIOS || Platform.isLinux;
+    Platform.isAndroid || Platform.isIOS || Platform.isLinux ||
+    Platform.isWindows;
+
+/// Linux and Windows desktop share the native plm_bridge engine.
+bool get isDesktopBridge => Platform.isLinux || Platform.isWindows;
 
 /// True when the app runs as a 32-bit process (32-bit Android, e.g. Android
 /// Go phones). LiteRT ships 64-bit only, and the address space limits model
@@ -37,12 +41,13 @@ class LoadResult {
   });
 }
 
-/// Android & iOS inference engine — wraps llama_flutter_android.
+/// Android & iOS inference engine â€” wraps llama_flutter_android.
 class InferenceEngine {
   LlamaController? _controller;
-  // Linux desktop: local GGUF via libplm_bridge.so instead of the
-  // llama_flutter_android method channel.
-  final LinuxLlamaEngine? _linux = Platform.isLinux ? LinuxLlamaEngine() : null;
+  // Linux & Windows desktop: local GGUF via the plm_bridge library instead
+  // of the llama_flutter_android method channel.
+  final LinuxLlamaEngine? _linux =
+      isDesktopBridge ? LinuxLlamaEngine() : null;
   LiteLmEngine? _liteEngine;
   LiteLmConversation? _liteConversation;
   StreamSubscription? _subscription;
@@ -53,7 +58,7 @@ class InferenceEngine {
   // GGUF model loaded together with a working vision projector.
   bool _ggufVisionLoaded = false;
   bool get ggufVisionLoaded =>
-      Platform.isLinux ? false : _ggufVisionLoaded;
+      isDesktopBridge ? false : _ggufVisionLoaded;
   bool _disposed = false;
   bool _hasLoadedModel = false;
   String? _liteConversationSystemPrompt;
@@ -80,11 +85,11 @@ class InferenceEngine {
     _disposed = false;
     final runtime = _runtimeFor(modelPath, modelRuntime);
     if (runtime == 'litert') {
-      if (Platform.isLinux) {
+      if (isDesktopBridge) {
         return LoadResult(
           success: false,
           message:
-              'LiteRT-LM models are Android-only in this build. Use a GGUF model on Linux desktop.',
+              'LiteRT-LM models are Android-only in this build. Use a GGUF model on desktop.',
         );
       }
       return _loadLiteRtModel(
@@ -98,7 +103,7 @@ class InferenceEngine {
       );
     }
 
-    if (Platform.isLinux) {
+    if (isDesktopBridge) {
       return _loadLinuxModel(
         modelPath,
         contextSize: contextSize,
@@ -122,7 +127,7 @@ class InferenceEngine {
       }
     } catch (_) {}
 
-    // ── GPU Detection ──
+    // â”€â”€ GPU Detection â”€â”€
     int gpuLayers = 0;
     String gpuNameStr = '';
 
@@ -143,7 +148,7 @@ class InferenceEngine {
         // On phones the GPU shares system RAM, and offloading copies the
         // weights into GPU buffers (CPU mode maps the file instead). If the
         // model + vision file won't fit in free RAM with that copy, Android's
-        // low-memory killer closes the app — so stay on the CPU.
+        // low-memory killer closes the app â€” so stay on the CPU.
         final modelBytes = await _fileLength(modelPath);
         final visionBytes =
             mmprojPath == null ? 0 : await _fileLength(mmprojPath);
@@ -151,18 +156,18 @@ class InferenceEngine {
         final free = gpu.freeRamBytes;
         if (free > 0 && needed > free) {
           print('[Inference] Model needs ~${needed ~/ (1024 * 1024)}MB for GPU '
-              'offload but only ${free ~/ (1024 * 1024)}MB is free — using CPU');
+              'offload but only ${free ~/ (1024 * 1024)}MB is free â€” using CPU');
         } else {
           gpuLayers = gpu.recommendedGpuLayers;
           print(
-              '[Inference] ✓ GPU offload: $gpuLayers layers on ${gpu.gpuName}');
+              '[Inference] âœ“ GPU offload: $gpuLayers layers on ${gpu.gpuName}');
         }
       }
     } catch (e) {
-      print('[Inference] GPU detection failed: $e — CPU fallback');
+      print('[Inference] GPU detection failed: $e â€” CPU fallback');
     }
 
-    // ── Thread Tuning ──
+    // â”€â”€ Thread Tuning â”€â”€
     int threads;
     if (gpuLayers > 0) {
       threads = deviceTier == 'ultra'
@@ -187,10 +192,10 @@ class InferenceEngine {
     if (isTensorSoC && modelName.contains('gemma')) {
       threads = 1;
       print(
-          '[Inference] Tensor SoC + Gemma detected — forcing single-threaded inference');
+          '[Inference] Tensor SoC + Gemma detected â€” forcing single-threaded inference');
     }
 
-    // ── Load Progress ──
+    // â”€â”€ Load Progress â”€â”€
     await _loadProgressSub?.cancel();
     _loadProgressSub = null;
     try {
@@ -199,7 +204,7 @@ class InferenceEngine {
       });
     } catch (_) {}
 
-    // ── Load ──
+    // â”€â”€ Load â”€â”€
     final visionError = await _controller!.loadModel(
       modelPath: modelPath,
       threads: threads,
@@ -216,7 +221,7 @@ class InferenceEngine {
     final accel = gpuLayers > 0
         ? 'GPU ($gpuLayers layers, $gpuNameStr)'
         : 'CPU ($threads threads)';
-    print('[Inference] ✓ Model loaded: $accel, ctx=$contextSize');
+    print('[Inference] âœ“ Model loaded: $accel, ctx=$contextSize');
 
     return LoadResult(
       success: true,
@@ -252,7 +257,7 @@ class InferenceEngine {
     final threads = cores <= 8 ? cores : (cores ~/ 2).clamp(4, 12);
 
     if (mmprojPath != null) {
-      print('[Inference] Linux bridge is text-only — mmproj ignored');
+      print('[Inference] Linux bridge is text-only â€” mmproj ignored');
     }
 
     final error = await engine.loadModel(
@@ -267,7 +272,7 @@ class InferenceEngine {
     }
 
     print(
-        '[Inference] ✓ Model loaded: CPU ($threads threads), ctx=$contextSize');
+        '[Inference] âœ“ Model loaded: CPU ($threads threads), ctx=$contextSize');
     return LoadResult(
       success: true,
       message: 'Model loaded (CPU, $threads threads).',
@@ -419,7 +424,7 @@ class InferenceEngine {
     String source = 'chat',
     void Function(String token)? onToken,
   }) async {
-    if (Platform.isLinux) {
+    if (isDesktopBridge) {
       return _generateLinux(
         prompt: prompt,
         conversationHistory: conversationHistory,
@@ -482,7 +487,7 @@ class InferenceEngine {
       finish(buffer.toString());
     };
 
-    // ── Use generateChat() for native template handling ──
+    // â”€â”€ Use generateChat() for native template handling â”€â”€
     Stream<String>? stream;
     try {
       final messages = _buildChatMessages(
@@ -501,7 +506,7 @@ class InferenceEngine {
       );
       print('[Inference] generateChat() started (${messages.length} messages)');
     } catch (e) {
-      print('[Inference] generateChat() failed: $e — fallback to generate()');
+      print('[Inference] generateChat() failed: $e â€” fallback to generate()');
       try {
         await _controller!.stop();
       } catch (_) {}
@@ -524,14 +529,14 @@ class InferenceEngine {
     _subscription = stream.listen(
       (token) {
         if (tokenCount == 0) {
-          print('[Inference] ✓ FIRST TOKEN received! Prefill done.');
+          print('[Inference] âœ“ FIRST TOKEN received! Prefill done.');
         }
         // Any token (even one that cleans to nothing) means the engine is
         // alive. The limit only catches a stuck engine: big models on CPU
         // can pause several seconds between tokens.
         _idleTimer?.cancel();
         _idleTimer = Timer(_tokenStallTimeout, () {
-          print('[Inference] Idle timeout — $tokenCount tokens');
+          print('[Inference] Idle timeout â€” $tokenCount tokens');
           finish(buffer.toString());
         });
         final clean = _sanitizeGemmaGarbage(token);
@@ -541,12 +546,12 @@ class InferenceEngine {
         onToken?.call(clean);
       },
       onDone: () {
-        print('[Inference] Stream onDone — $tokenCount tokens total');
+        print('[Inference] Stream onDone â€” $tokenCount tokens total');
         finish(buffer.toString(), stopNative: false);
       },
       onError: (error) {
         print('[Inference] Stream error: $error');
-        finish('ERROR: Generation failed — $error');
+        finish('ERROR: Generation failed â€” $error');
       },
     );
 
@@ -631,11 +636,11 @@ class InferenceEngine {
     _subscription = stream.listen(
       (token) {
         if (tokenCount == 0) {
-          print('[Inference] ✓ FIRST TOKEN received! Prefill done.');
+          print('[Inference] âœ“ FIRST TOKEN received! Prefill done.');
         }
         _idleTimer?.cancel();
         _idleTimer = Timer(_tokenStallTimeout, () {
-          print('[Inference] Idle timeout — $tokenCount tokens');
+          print('[Inference] Idle timeout â€” $tokenCount tokens');
           finish(buffer.toString());
         });
         final clean = _sanitizeGemmaGarbage(token);
@@ -645,12 +650,12 @@ class InferenceEngine {
         onToken?.call(clean);
       },
       onDone: () {
-        print('[Inference] Stream onDone — $tokenCount tokens total');
+        print('[Inference] Stream onDone â€” $tokenCount tokens total');
         finish(buffer.toString(), stopNative: false);
       },
       onError: (error) {
         print('[Inference] Stream error: $error');
-        finish('ERROR: Generation failed — $error');
+        finish('ERROR: Generation failed â€” $error');
       },
     );
 
@@ -930,7 +935,7 @@ class InferenceEngine {
       _liteConversationHasMessages = false;
       _liteConversationOwner = null;
     }
-    // llama.cpp (GGUF) is stateless per-generation — no native
+    // llama.cpp (GGUF) is stateless per-generation â€” no native
     // conversation object to reset.
   }
 
@@ -979,7 +984,7 @@ class InferenceEngine {
     _liteConversationHasMessages = false;
   }
 
-  // ── Helpers ──
+  // â”€â”€ Helpers â”€â”€
 
   /// Safety cap on a single generation. It scales with the token budget
   /// (allowing ~1 token/s) so slow phones aren't cut off mid-answer; the idle
@@ -988,7 +993,7 @@ class InferenceEngine {
       Duration(seconds: maxTokens > minSeconds ? maxTokens : minSeconds);
 
   static const _timeLimitNote =
-      '\n\n⚠️ Stopped: this reply hit the time limit for one response.';
+      '\n\nâš ï¸ Stopped: this reply hit the time limit for one response.';
 
   String _runtimeFor(String modelPath, String? modelRuntime) {
     final runtime = modelRuntime?.toLowerCase();
@@ -1039,7 +1044,7 @@ class InferenceEngine {
 
   /// Strip Gemma garbage tokens that leak when Q4_K_M dequant is corrupt
   /// on Google Tensor SoC. Harmless on devices that don't produce them.
-  /// NOTE: Do NOT trim() — SentencePiece tokens rely on leading spaces.
+  /// NOTE: Do NOT trim() â€” SentencePiece tokens rely on leading spaces.
   Future<int> _fileLength(String path) async {
     try {
       return await File(path).length();

@@ -15,7 +15,10 @@ permissions:
   contents: write
 
 env:
-  FLUTTER_VERSION: '3.50.0'
+  # 3.50.0 has a Linux rendering regression on some multi-GPU/multi-monitor
+  # machines (window content painted offset, black background). 3.47.9 is
+  # verified to render correctly on the same machine.
+  FLUTTER_VERSION: '3.47.9'
 
 jobs:
   android:

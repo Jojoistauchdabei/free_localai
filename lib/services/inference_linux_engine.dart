@@ -504,6 +504,24 @@ class LinuxLlamaEngine {
 
   static int get totalGpuMemoryBytes => gpuTotalMemoryBytes;
 
+  /// Reported memory of every integrated GPU. An iGPU has no VRAM of its
+  /// own — its "total" is a pool it can borrow from system RAM, so the CPU's
+  /// share is what remains after subtracting it.
+  static int get integratedGpuTotalMemoryBytes {
+    try {
+      final integrated = gpuIntegrated;
+      var total = 0;
+      for (var i = 0; i < PlmBridge.gpuCount(); i++) {
+        if (i < integrated.length && integrated[i]) {
+          total += PlmBridge.gpuTotalMemory(i);
+        }
+      }
+      return total;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Free physical RAM on Linux and Windows.
   static int get freeRamBytes => _freeRamBytes();
 

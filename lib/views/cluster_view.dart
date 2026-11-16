@@ -10,9 +10,14 @@ import '../core/ui.dart';
 import '../services/cluster_service.dart';
 import '../services/inference_service.dart';
 import '../services/lan_model_share_service.dart';
+import '../services/mesh/mesh_logic.dart';
+import '../services/mesh_service.dart';
 
-/// Phone cluster: pick Master (runs the model) or Worker (lends this phone),
-/// and pair them by scanning the worker's QR code.
+/// Device mesh: all paired devices are equal nodes. One node is the master
+/// (it hosts the model and stitches the model connections together) — chosen
+/// automatically, changeable, and handed over on its own when it is lost.
+/// Every node can send prompts; chats always reach whichever device hosts
+/// the model.
 class ClusterView extends StatefulWidget {
   const ClusterView({super.key});
 
@@ -22,14 +27,20 @@ class ClusterView extends StatefulWidget {
 
 class _ClusterViewState extends State<ClusterView> {
   final ClusterService cluster = Get.find<ClusterService>();
+  late final MeshClusterService mesh;
   Timer? _wifiTimer;
 
   @override
   void initState() {
     super.initState();
+    mesh = Get.find<MeshClusterService>();
     cluster.refreshWorkerStatus();
     cluster.refreshWifiAddress();
-    if (cluster.role == ClusterRole.master) cluster.relocateWorkers();
+    cluster.refreshLocalCpuDevice();
+    cluster.refreshLocalMetrics();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(cluster.refreshLocalGpuDevices());
+    });
     // Pick up Wi-Fi being turned on while this screen is open.
     _wifiTimer = Timer.periodic(
         const Duration(seconds: 3), (_) => cluster.refreshWifiAddress());
@@ -46,367 +57,262 @@ class _ClusterViewState extends State<ClusterView> {
     final t = AppTokens.of(context);
     return Scaffold(
       backgroundColor: t.bg,
-      appBar: appScreenBar(context, title: 'Phone cluster', showBack: true),
+      appBar: appScreenBar(context, title: 'Device mesh', showBack: true),
       body: Obx(() {
-        final role = cluster.role;
+        final on = mesh.clusterEnabled.value;
         return ListView(
           padding: kPagePadding,
           children: [
             const SizedBox(height: 8),
-            AppSegmented<ClusterRole>(
-              items: [
-                (ClusterRole.off, 'Off'),
-                if (ClusterService.canBeMaster) (ClusterRole.master, 'Master'),
-                if (ClusterService.canBeWorker) (ClusterRole.worker, 'Worker'),
-              ],
-              selected: role,
-              onChanged: cluster.setRole,
+            AppSegmented<bool>(
+              items: const [(false, 'Off'), (true, 'Connected')],
+              selected: on,
+              onChanged: (value) => value
+                  ? mesh.enableCluster()
+                  : mesh.disableCluster(),
             ),
             const SizedBox(height: 16),
-            if (role != ClusterRole.off &&
-                cluster.wifiAddress.value == null) ...[
+            if (on && cluster.wifiAddress.value == null) ...[
               AppNotice(
-                'Turn on Wi-Fi. All phones in the cluster must be on the same Wi-Fi network.',
+                'Turn on Wi-Fi. All devices in the mesh must be reachable over '
+                'the network (same Wi-Fi, or Tailscale).',
                 icon: Icons.wifi_off_rounded,
                 color: t.orange,
               ),
               const SizedBox(height: 16),
             ],
-            if (role != ClusterRole.off &&
-                Get.isRegistered<LanModelShareService>()) ...[
-              _lanModelsSection(context, Get.find<LanModelShareService>()),
+            const SizedBox(height: 16),
+            // This PC's own hardware: always visible, independent of the
+            // mesh being on or off.
+            if (cluster.localGpuDevices.isNotEmpty ||
+                cluster.localCpuDevice.value != null) ...[
+              SectionHeader('Dieser PC · Geräte (eigene Worker)'),
+              _thisPcDevicesCard(context),
               const SizedBox(height: 16),
             ],
-            ...switch (role) {
-              ClusterRole.off => _offSection(),
-              ClusterRole.master => _masterSection(context),
-              ClusterRole.worker => _workerSection(context),
-            },
+            if (on) ...[
+              _selfCard(context),
+              const SizedBox(height: 16),
+              if (cluster.split.length > 1) ...[
+                _SplitCard(shares: cluster.split),
+                const SizedBox(height: 16),
+              ],
+              _nodesSection(context),
+              const SizedBox(height: 16),
+              _networkCard(context),
+              const SizedBox(height: 16),
+              _pairingSection(context),
+            ] else ...[
+              AppNotice(
+                'Pair devices once and they stay paired. The first device you '
+                'pair from becomes the master and hosts the model; every '
+                'device can send prompts, and if a device — even the master — '
+                'is lost, the mesh reloads the model on the rest by itself.',
+                icon: Icons.hub_outlined,
+              ),
+            ],
+            if (on && Get.isRegistered<LanModelShareService>()) ...[
+              const SizedBox(height: 16),
+              _lanModelsSection(context, Get.find<LanModelShareService>()),
+            ],
+            const SizedBox(height: 24),
+            SectionFootnote(
+              'Devices communicate over the llama.cpp RPC link plus a small '
+              'mesh control channel. Changes apply on the next model load; '
+              'the mesh reloads models on its own when devices come or go.',
+            ),
           ],
         );
       }),
     );
   }
 
-  List<Widget> _offSection() => [
-        AppNotice(
-          ClusterService.canBeMaster
-              ? 'Run models too big for one phone by sharing the work across '
-                  'phones on the same Wi-Fi.\n\n'
-                  'Master: the phone you chat on. It runs the model.\n'
-                  'Worker: a phone that lends its memory to the master.'
-              : 'Help an Android phone running PrivateLM run models too big for '
-                  'it alone: choose Worker, then scan this device\'s QR code '
-                  'from that phone.',
-          icon: Icons.hub_outlined,
-        ),
-      ];
+  // ── This device ──────────────────────────────────────────────────────
 
-  // ── Worker ─────────────────────────────────────────────────────────────
-
-  List<Widget> _workerSection(BuildContext context) {
+  Widget _selfCard(BuildContext context) {
     final t = AppTokens.of(context);
-    final s = cluster.worker.value;
-    final qr = cluster.workerQrData;
-
-    final Widget body;
-    if (s.state == 'error') {
-      body = _centered(context, [
-        Icon(Icons.error_outline_rounded, size: 40, color: t.red),
-        const SizedBox(height: 12),
-        Text('Worker stopped', style: t.bodyStrong),
-        const SizedBox(height: 4),
-        Text(s.error ?? 'Unknown error',
-            style: t.caption, textAlign: TextAlign.center),
-        const SizedBox(height: 16),
-        PillButton(
-            label: 'Try again', primary: true, onPressed: cluster.startWorker),
-      ]);
-    } else if (s.peer != null) {
-      body = _centered(context, [
-        _PulsingDot(color: t.green),
-        const SizedBox(height: 14),
-        Text('Sharing with master', style: t.bodyStrong.copyWith(fontSize: 18)),
-        const SizedBox(height: 4),
-        Text(s.peer!, style: t.caption),
-        const SizedBox(height: 20),
-        Row(children: [
-          Expanded(child: _Stat(label: 'Holding', value: _gb(s.heldMb))),
-          Expanded(child: _Stat(label: 'Free at start', value: _gb(s.ramMb))),
-          Expanded(
-              child: _Stat(
-                  label: 'Memory speed',
-                  value: '${s.bandwidth.toStringAsFixed(1)} GB/s')),
-        ]),
-      ]);
-    } else if (!s.running || qr == null) {
-      body = _centered(context, [
-        const SizedBox(
-            width: 28,
-            height: 28,
-            child: CircularProgressIndicator(strokeWidth: 2.5)),
-        const SizedBox(height: 16),
-        Text(s.running ? 'Waiting for Wi-Fi…' : 'Measuring this phone…',
-            style: t.caption),
-      ]);
-    } else {
-      body = _centered(context, [
-        Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
+    final policy = mesh.localPolicy.value;
+    final role = mesh.selfIsMaster ? 'Master' : 'Node';
+    final inference = Get.find<InferenceService>();
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(children: [
+            Icon(
+              mesh.selfIsMaster
+                  ? Icons.dns_rounded
+                  : Icons.smartphone_rounded,
+              color: t.accent,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${mesh.nodeName} (this device)',
+                        style: t.bodyStrong),
+                    Text(
+                      '$role · ${_linkLabel(mesh.localLink.value)}'
+                      '${cluster.worker.value.running ? ' · contributing' : ''}'
+                      '${inference.isModelLoaded.value ? ' · hosting the model' : ''}',
+                      style: t.caption,
+                    ),
+                  ]),
+            ),
+            StatusDot(t.green, size: 10),
+          ]),
+          if (policy.contribution == Contribution.none &&
+              mesh.clusterEnabled.value) ...[
+            const SizedBox(height: 10),
+            Text(policy.reason, style: t.caption.copyWith(color: t.orange)),
+          ],
+          const SizedBox(height: 10),
+          Text(
+            'Auto mode: the mesh picks the master, moves it when a device is '
+            'lost, and reloads the model over the remaining devices. You can '
+            'pin a master below.',
+            style: t.small,
           ),
-          child: QrImageView(data: qr, size: 220, padding: EdgeInsets.zero),
-        ),
-        const SizedBox(height: 16),
-        Text('Scan this from the master phone', style: t.bodyStrong),
-        const SizedBox(height: 6),
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          StatusDot(t.green, size: 8),
-          const SizedBox(width: 6),
-          Text('Ready · ${cluster.wifiAddress.value}', style: t.caption),
-        ]),
-        const SizedBox(height: 16),
-        Row(children: [
-          Expanded(child: _Stat(label: 'Free memory', value: _gb(s.ramMb))),
-          Expanded(
-              child: _Stat(
-                  label: 'Memory speed',
-                  value: '${s.bandwidth.toStringAsFixed(1)} GB/s')),
-        ]),
-      ]);
-    }
-
-    return [
-      if (s.throttled) ...[
-        AppNotice(
-          'Android is slowing this worker down (slow cores only), which slows '
-          'the whole cluster. Set PrivateLM\'s battery use to Unrestricted, '
-          'then turn Worker off and on.',
-          icon: Icons.speed_rounded,
-          color: t.orange,
-        ),
-        const SizedBox(height: 8),
-        const Align(
-          alignment: Alignment.centerLeft,
-          child: PillButton(
-            label: 'Set Unrestricted',
-            primary: true,
-            onPressed: LlamaCluster.requestBatteryUnrestricted,
-          ),
-        ),
-        const SizedBox(height: 16),
-      ],
-      AppCard(padding: const EdgeInsets.fromLTRB(16, 24, 16, 20), child: body),
-      SectionFootnote(ClusterService.workerStopsWithApp
-          ? 'Keep this device plugged in, on the same Wi-Fi, with PrivateLM open: '
-              'iOS pauses apps in the background. Close PrivateLM to stop sharing.'
-          : 'Keep this phone plugged in and on the same Wi-Fi, with PrivateLM '
-              'open: the screen stays on while sharing, because Android slows '
-              'background work. Set Phone cluster to Off to stop.'),
-    ];
+        ],
+      ),
+    );
   }
 
-  Widget _centered(BuildContext context, List<Widget> children) =>
-      Column(crossAxisAlignment: CrossAxisAlignment.center, children: children);
+  // ── Nodes ────────────────────────────────────────────────────────────
 
-  // ── Master ─────────────────────────────────────────────────────────────
-
-  List<Widget> _masterSection(BuildContext context) {
+  Widget _nodesSection(BuildContext context) {
     final t = AppTokens.of(context);
-    // Keep the scheduling card in the same observer as the rest of the
-    // master view so changing modes does not reparent nested reactive trees.
-    cluster.scheduleMode.value;
-    return [
-      _scheduleCard(context),
-      const SizedBox(height: 16),
-      if (cluster.split.length > 1) ...[
-        _SplitCard(shares: cluster.split),
-        const SizedBox(height: 16),
-      ],
+    final nodes = mesh.nodes.toList();
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      SectionHeader('Devices (${nodes.length})'),
+      AppGroup(dividerIndent: 56, children: [
+        for (final node in nodes)
+          AppRow(
+            icon: node.id == mesh.nodeId
+                ? Icons.computer_rounded
+                : Icons.smartphone_rounded,
+            title: node.isMaster ? '${node.name} · Master' : node.name,
+            subtitle: [
+              if (node.id != mesh.nodeId) _stateLabel(node.state),
+              if (node.latencyMs != null) '${node.latencyMs} ms',
+              _linkLabel(node.linkType),
+              if (node.modelLoaded) 'hosts model',
+              if (node.id != mesh.nodeId && node.rpcEndpoint != null)
+                node.rpcEndpoint!,
+            ].join(' · '),
+            trailing: node.id == mesh.nodeId
+                ? null
+                : Icon(Icons.more_vert_rounded, color: t.muted),
+            onTap: node.id == mesh.nodeId ? null : () => _nodeSheet(node),
+          ),
+      ]),
+    ]);
+  }
+
+  Future<void> _nodeSheet(MeshNodeInfo node) async {
+    final action = await showAppSheet<String>(
+      context,
+      title: node.name,
+      subtitle: [
+        _stateLabel(node.state),
+        if (node.latencyMs != null) '${node.latencyMs} ms',
+        _linkLabel(node.linkType),
+      ].join(' · '),
+      builder: (ctx) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!node.isMaster)
+            PrimaryButton(
+              label: 'Make master',
+              icon: Icons.dns_rounded,
+              onPressed: () => Navigator.pop(ctx, 'master'),
+            ),
+          if (!node.isMaster) const SizedBox(height: 10),
+          TonalButton.neutral(
+            ctx,
+            label: 'Remove device',
+            onTap: () => Navigator.pop(ctx, 'remove'),
+          ),
+        ],
+      ),
+    );
+    if (action == 'master') {
+      await mesh.setPreferredMaster(node.id);
+      if (mounted) {
+        showToast('Master set',
+            '${node.name} hosts the model for the whole mesh.',
+            tone: ToastTone.success);
+      }
+    } else if (action == 'remove') {
+      final w = Get.find<ClusterService>().workers.firstWhereOrNull(
+          (w) => '${w.host}:${w.port}' == node.rpcEndpoint);
+      if (w != null) await cluster.remove(w);
+    }
+  }
+
+  // ── Network analysis ─────────────────────────────────────────────────
+
+  Widget _networkCard(BuildContext context) {
+    final t = AppTokens.of(context);
+    final events = mesh.recentEvents(limit: 12);
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(children: [
+            Icon(Icons.monitor_heart_outlined, color: t.accent),
+            const SizedBox(width: 10),
+            Expanded(
+                child: Text('Network analysis', style: t.bodyStrong)),
+            Text(_linkLabel(mesh.localLink.value), style: t.caption),
+          ]),
+          const SizedBox(height: 10),
+          if (events.isEmpty)
+            Text('No network events yet.', style: t.caption)
+          else
+            for (final e in events)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(children: [
+                  StatusDot(_eventColor(t, e.kind), size: 8),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(e.message, style: t.caption, maxLines: 2),
+                  ),
+                  Text(_timeOf(e.tsMs), style: t.small),
+                ]),
+              ),
+        ],
+      ),
+    );
+  }
+
+  Color _eventColor(AppTokens t, String kind) => switch (kind) {
+        'online' || 'paired' || 'master' || 'rebalance' => t.green,
+        'offline' || 'error' => t.red,
+        _ => t.muted,
+      };
+
+  String _timeOf(int tsMs) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(tsMs);
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}:'
+        '${dt.second.toString().padLeft(2, '0')}';
+  }
+
+  // ── Pairing ──────────────────────────────────────────────────────────
+
+  Widget _pairingSection(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      SectionHeader('Pair a device'),
       PrimaryButton(
-        label: 'Scan a worker\'s QR code',
+        label: 'Scan a device\'s QR code',
         icon: Icons.qr_code_scanner_rounded,
         onPressed: _scanQr,
       ),
-      SectionHeader('Workers (${cluster.workers.length})'),
-      if (cluster.workers.isEmpty)
-        const AppGroup(children: [
-          EmptyState(
-            icon: Icons.devices_other_rounded,
-            title: 'No workers yet',
-            message: 'On each other phone, open Phone cluster, choose Worker, '
-                'then scan the QR code it shows.',
-          ),
-        ])
-      else
-        AppGroup(dividerIndent: 60, children: [
-          for (final w in cluster.workers)
-            AppRow(
-              icon: Icons.smartphone_rounded,
-              title: w.model ?? w.name,
-              subtitle: [
-                w.endpoint,
-                if (w.ramMb != null) '${_gb(w.ramMb!)} free',
-                if (w.bandwidth != null)
-                  '${w.bandwidth!.toStringAsFixed(1)} GB/s',
-              ].join(' · '),
-              trailing: IconButton(
-                icon: Icon(Icons.close_rounded, color: t.muted),
-                tooltip: 'Remove',
-                onPressed: () => cluster.remove(w),
-              ),
-            ),
-        ]),
-      if (cluster.workers.isNotEmpty) ...[
-        const SizedBox(height: 12),
-        SectionHeader('Paired device resources'),
-        AppCard(
-          child: Column(
-            children: [
-              for (final worker in cluster.workers)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.device_hub_rounded),
-                  title: Text(worker.model ?? worker.name),
-                  subtitle: Text([
-                    if (worker.ramMb != null)
-                      '${_gb(worker.ramMb!)} free system RAM',
-                    if (worker.bandwidth != null)
-                      '${worker.bandwidth!.toStringAsFixed(1)} GB/s memory',
-                    if (cluster.split.isNotEmpty)
-                      '${_shareFor(worker)} model share',
-                  ].join(' · ')),
-                  trailing: Text(
-                    cluster.scheduleMode.value == 'manual' &&
-                            (cluster.workerWeights[worker.endpoint] ?? 0) == 0
-                        ? 'OFF'
-                        : 'ON',
-                    style: t.caption,
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ],
-      if (cluster.localGpuDevices.isNotEmpty ||
-          cluster.localCpuDevice.value != null) ...[
-        const SizedBox(height: 20),
-        SectionHeader('Dieser PC · Geräte (eigene Worker)'),
-        AppCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                'Jedes Gerät zählt als eigener Worker: dedizierte GPU, zweite '
-                'GPU, integrierte Grafik und CPU werden getrennt geführt. '
-                'Aktiviere mehrere Geräte, um ein Modell auf alle zu '
-                'verteilen.',
-                style: t.caption,
-              ),
-              const SizedBox(height: 8),
-              Row(children: [
-                PillButton(
-                  label: 'Nur schnellste',
-                  icon: Icons.speed_rounded,
-                  onPressed: cluster.autoSelectLocalGpus,
-                ),
-                const SizedBox(width: 8),
-                PillButton(
-                  label: 'Alle',
-                  icon: Icons.select_all_rounded,
-                  onPressed: cluster.selectAllLocalGpus,
-                ),
-              ]),
-              const SizedBox(height: 4),
-              for (final gpu in cluster.localGpuDevices)
-                CheckboxListTile(
-                  value: gpu.selected,
-                  onChanged: (value) =>
-                      cluster.setLocalGpuSelected(gpu.index, value ?? false),
-                  contentPadding: EdgeInsets.zero,
-                  secondary: Icon(gpu.isIntegrated
-                      ? Icons.developer_board_rounded
-                      : Icons.videogame_asset_rounded),
-                  title: Text(gpu.isIntegrated
-                      ? '${gpu.name} · integrierte Grafik'
-                      : gpu.name),
-                  subtitle: Text(
-                    [
-                      '${_gb(gpu.freeMemoryBytes / (1024 * 1024))} frei von '
-                      '${_gb(gpu.totalMemoryBytes / (1024 * 1024))}'
-                      ' · ${gpu.totalMemoryBytes > 0 ? ((1 - gpu.freeMemoryBytes / gpu.totalMemoryBytes) * 100).round() : 0}% belegt',
-                      if (gpu.memorySpeedGbps > 0)
-                        '${gpu.memorySpeedGbps.toStringAsFixed(1)} GB/s',
-                      if (gpu.isIntegrated) 'nutzt System-RAM',
-                    ].join(' · '),
-                  ),
-                ),
-              if (cluster.localCpuDevice.value != null) ...[
-                const Divider(height: 24),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.memory_rounded),
-                  title: Text(
-                      'CPU · ${cluster.localCpuDevice.value!.name}'),
-                  subtitle: Text(
-                    [
-                      'System-RAM gesamt: '
-                          '${_gb(cluster.localCpuDevice.value!.totalMemoryBytes / (1024 * 1024))}',
-                      if (cluster.localCpuDevice.value!.integratedGpuMemoryBytes >
-                          0)
-                        'davon integrierte Grafik: '
-                            '${_gb(cluster.localCpuDevice.value!.integratedGpuMemoryBytes / (1024 * 1024))} (abgezogen)',
-                      '${_gb(cluster.localCpuDevice.value!.usableMemoryBytes / (1024 * 1024))} für die CPU frei'
-                          ' · '
-                          '${cluster.localCpuDevice.value!.effectiveCores} von '
-                          '${cluster.localCpuDevice.value!.logicalCores} Kernen'
-                          ' · '
-                          '${cluster.localCpuDevice.value!.computeTops.toStringAsFixed(3)} TOPS',
-                    ].join('\n'),
-                  ),
-                ),
-                Row(children: [
-                  SizedBox(
-                    width: 110,
-                    child: Text(
-                      'CPU-Kerne: '
-                          '${cluster.localCpuDevice.value!.effectiveCores} / '
-                          '${cluster.localCpuDevice.value!.logicalCores}',
-                      style: t.caption,
-                    ),
-                  ),
-                  Expanded(
-                    child: Slider(
-                      value: cluster.localCpuDevice.value!.effectiveCores
-                          .clamp(1, cluster.localCpuDevice.value!.logicalCores)
-                          .toDouble(),
-                      min: 1,
-                      max: cluster.localCpuDevice.value!.logicalCores
-                          .toDouble(),
-                      divisions:
-                          cluster.localCpuDevice.value!.logicalCores > 1
-                              ? cluster.localCpuDevice.value!.logicalCores - 1
-                              : null,
-                      label:
-                          '${cluster.localCpuDevice.value!.effectiveCores} Kerne',
-                      onChanged: (value) =>
-                          cluster.setCpuThreads(value.round()),
-                    ),
-                  ),
-                ]),
-              ],
-            ],
-          ),
-        ),
-      ],
-      const SectionFootnote(
-        'Paired devices communicate over the local network through the '
-        'llama.cpp RPC link. The master keeps the chat session; workers '
-        'provide their assigned model memory. Changes apply on the next load.',
-      ),
-      const SectionHeader('Other ways to add'),
+      const SizedBox(height: 10),
       Row(children: [
         PillButton(
           label: cluster.isScanning.value ? 'Searching…' : 'Find nearby',
@@ -436,127 +342,202 @@ class _ClusterViewState extends State<ClusterView> {
             ),
         ]),
       ],
-    ];
+      const SizedBox(height: 12),
+      // The old worker view: this device's own QR code, so another device
+      // (usually the first-paired master) can pair it.
+      _ownQrCard(context),
+    ]);
   }
 
-  Widget _scheduleCard(BuildContext context) {
+  /// This PC's hardware, shown as separate worker devices: every GPU, the
+  /// integrated GPU (its memory is system RAM) and the CPU with a
+  /// configurable core count.
+  Widget _thisPcDevicesCard(BuildContext context) {
     final t = AppTokens.of(context);
-    final sharing = Get.isRegistered<LanModelShareService>()
-        ? Get.find<LanModelShareService>()
-        : null;
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Master scheduling', style: t.bodyStrong),
-          const SizedBox(height: 4),
           Text(
-            'Smart uses the fastest available devices. Manual lets you '
-            'exclude devices or assign their relative share.',
+            'Jedes Gerät zählt als eigener Worker: dedizierte GPU, zweite '
+            'GPU, integrierte Grafik und CPU werden getrennt geführt. '
+            'Aktiviere mehrere Geräte, um ein Modell auf alle zu verteilen.',
             style: t.caption,
           ),
-          const SizedBox(height: 10),
-          AppSegmented<String>(
-            items: const [('smart', 'Smart'), ('manual', 'Manual')],
-            selected: cluster.scheduleMode.value,
-            onChanged: cluster.setScheduleMode,
-          ),
-          if (cluster.scheduleMode.value == 'manual' &&
-              cluster.workers.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            _weightRow(
-              label: 'This PC',
-              value: cluster.localWeight.value,
-              onChanged: cluster.setLocalWeight,
-            ),
-            for (final worker in cluster.workers)
-              _weightRow(
-                label: worker.model ?? worker.name,
-                value: cluster.workerWeights[worker.endpoint] ?? 0,
-                onChanged: (value) => cluster.setWorkerWeight(worker, value),
-              ),
-          ],
-          const Divider(height: 20),
-          Text('Live cluster statistics', style: t.bodyStrong),
           const SizedBox(height: 8),
-          _clusterStats(context, sharing),
+          Row(children: [
+            PillButton(
+              label: 'Nur schnellste',
+              icon: Icons.speed_rounded,
+              onPressed: cluster.autoSelectLocalGpus,
+            ),
+            const SizedBox(width: 8),
+            PillButton(
+              label: 'Alle',
+              icon: Icons.select_all_rounded,
+              onPressed: cluster.selectAllLocalGpus,
+            ),
+          ]),
+          const SizedBox(height: 4),
+          for (final gpu in cluster.localGpuDevices)
+            CheckboxListTile(
+              value: gpu.selected,
+              onChanged: (value) =>
+                  cluster.setLocalGpuSelected(gpu.index, value ?? false),
+              contentPadding: EdgeInsets.zero,
+              secondary: Icon(gpu.isIntegrated
+                  ? Icons.developer_board_rounded
+                  : Icons.videogame_asset_rounded),
+              title: Text(gpu.isIntegrated
+                  ? '${gpu.name} · integrierte Grafik'
+                  : gpu.name),
+              subtitle: Text(
+                [
+                  '${_gb(gpu.freeMemoryBytes / (1024 * 1024))} frei von '
+                  '${_gb(gpu.totalMemoryBytes / (1024 * 1024))}'
+                  ' · ${gpu.totalMemoryBytes > 0 ? ((1 - gpu.freeMemoryBytes / gpu.totalMemoryBytes) * 100).round() : 0}% belegt',
+                  if (gpu.memorySpeedGbps > 0)
+                    '${gpu.memorySpeedGbps.toStringAsFixed(1)} GB/s',
+                  if (gpu.isIntegrated) 'nutzt System-RAM',
+                ].join(' · '),
+              ),
+            ),
+          if (cluster.localCpuDevice.value != null) ...[
+            const Divider(height: 24),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.memory_rounded),
+              title: Text('CPU · ${cluster.localCpuDevice.value!.name}'),
+              subtitle: Text(
+                [
+                  'System-RAM gesamt: '
+                      '${_gb(cluster.localCpuDevice.value!.totalMemoryBytes / (1024 * 1024))}',
+                  if (cluster.localCpuDevice.value!.integratedGpuMemoryBytes >
+                      0)
+                    'davon integrierte Grafik: '
+                        '${_gb(cluster.localCpuDevice.value!.integratedGpuMemoryBytes / (1024 * 1024))} (abgezogen)',
+                  '${_gb(cluster.localCpuDevice.value!.usableMemoryBytes / (1024 * 1024))} für die CPU frei'
+                      ' · '
+                      '${cluster.localCpuDevice.value!.effectiveCores} von '
+                      '${cluster.localCpuDevice.value!.logicalCores} Kernen'
+                      ' · '
+                      '${cluster.localCpuDevice.value!.computeTops.toStringAsFixed(3)} TOPS',
+                ].join('\n'),
+              ),
+            ),
+            Row(children: [
+              SizedBox(
+                width: 110,
+                child: Text(
+                  'CPU-Kerne: '
+                      '${cluster.localCpuDevice.value!.effectiveCores} / '
+                      '${cluster.localCpuDevice.value!.logicalCores}',
+                  style: t.caption,
+                ),
+              ),
+              Expanded(
+                child: Slider(
+                  value: cluster.localCpuDevice.value!.effectiveCores
+                      .clamp(1, cluster.localCpuDevice.value!.logicalCores)
+                      .toDouble(),
+                  min: 1,
+                  max: cluster.localCpuDevice.value!.logicalCores.toDouble(),
+                  divisions: cluster.localCpuDevice.value!.logicalCores > 1
+                      ? cluster.localCpuDevice.value!.logicalCores - 1
+                      : null,
+                  label:
+                      '${cluster.localCpuDevice.value!.effectiveCores} Kerne',
+                  onChanged: (value) => cluster.setCpuThreads(value.round()),
+                ),
+              ),
+            ]),
+          ],
         ],
       ),
     );
   }
 
-  String _shareFor(ClusterWorker worker) {
-    final share = cluster.split.firstWhereOrNull((item) =>
-        item.name == (worker.model ?? worker.name) ||
-        item.name == worker.endpoint);
-    return share == null ? 'not assigned' : _gb(share.mb);
-  }
-
-  Widget _weightRow({
-    required String label,
-    required double value,
-    required ValueChanged<double> onChanged,
-  }) {
-    return Row(
-      children: [
-        Expanded(child: Text(label, overflow: TextOverflow.ellipsis)),
-        SizedBox(
-          width: 150,
-          child: Slider(
-            value: value.clamp(0, 100),
-            min: 0,
-            max: 100,
-            divisions: 20,
-            label: '${value.round()}%',
-            onChanged: onChanged,
-          ),
-        ),
-        SizedBox(width: 38, child: Text('${value.round()}%')),
-      ],
-    );
-  }
-
-  Widget _clusterStats(BuildContext context, LanModelShareService? sharing) {
+  Widget _ownQrCard(BuildContext context) {
     final t = AppTokens.of(context);
-    final inference = Get.isRegistered<InferenceService>()
-        ? Get.find<InferenceService>()
-        : null;
-    final cpu = cluster.localCpuDevice.value;
-    final gpuMemory = cluster.localGpuDevices
-        .fold<int>(0, (sum, device) => sum + device.freeMemoryBytes);
-    final split = cluster.split;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Text(
-          [
-            if (cpu != null)
-              'RAM frei ${(cpu.usableMemoryBytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB'
-                  '${cpu.integratedGpuMemoryBytes > 0 ? ' (ohne ${((cpu.integratedGpuMemoryBytes / 1024 / 1024 / 1024).toStringAsFixed(1))} GB iGPU)' : ''}'
-                  ' · ${cpu.effectiveCores} CPU-Kerne',
-            if (gpuMemory > 0)
-              'GPU frei ${(gpuMemory / 1024 / 1024 / 1024).toStringAsFixed(1)} GB',
-            if (cluster.freeStorageBytes.value != null)
-              'Speicher frei ${(cluster.freeStorageBytes.value! / 1024 / 1024 / 1024).toStringAsFixed(1)} GB',
-            if (inference != null)
-              '${inference.tokensPerSecond.value.toStringAsFixed(1)} tok/s'
-                  ' · ${inference.tokenCount.value} Tokens',
-            if (sharing != null)
-              'LAN-Kopien ${(sharing.transferredBytes.value / 1024 / 1024).toStringAsFixed(1)} MB',
-          ].join('\n'),
-          style: t.caption,
-        ),
-        if (split.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          for (final share in split)
-            Text(
-              '${share.name}: ${(share.mb / 1024).toStringAsFixed(1)} GB Modellanteil',
-              style: t.caption,
+    final qr = cluster.workerQrData;
+    final running = cluster.worker.value.running;
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('This device\'s code', style: t.bodyStrong),
+          const SizedBox(height: 4),
+          Text(
+            running && qr != null
+                ? 'Scan this from another device to pair it here.'
+                : 'Start contributing (pair with any mesh) to show a code. '
+                    'Open the mesh on this device, then pair from the other '
+                    'device.',
+            style: t.caption,
+          ),
+          if (running && qr != null) ...[
+            const SizedBox(height: 12),
+            Center(
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: QrImageView(
+                    data: qr, size: 180, padding: EdgeInsets.zero),
+              ),
             ),
+            const SizedBox(height: 8),
+            Center(
+                child: Text('Ready · ${cluster.wifiAddress.value}',
+                    style: t.caption)),
+          ],
         ],
-      ],
+      ),
     );
   }
+
+  Future<void> _scanQr() async {
+    final code = await Get.to<String>(() => const _QrScanPage());
+    if (code != null) await _report(cluster.addFromQr(code));
+  }
+
+  Future<void> _enterIp(BuildContext context) async {
+    final input = await showAppSheet<String>(
+      context,
+      title: 'Enter device IP',
+      subtitle: 'Shown under the other device\'s QR code',
+      builder: (_) => const _WorkerIpEntrySheet(),
+    );
+    if (input != null) await _report(cluster.addManual(input));
+  }
+
+  Future<void> _report(Future<String?> adding) async {
+    final error = await adding;
+    if (error != null) {
+      showToast('Couldn\'t add device', error, tone: ToastTone.error);
+    } else {
+      showToast('Device paired',
+          'It stays paired and joins the model on the next load.',
+          tone: ToastTone.success);
+    }
+  }
+
+  String _stateLabel(NodeState state) => switch (state) {
+        NodeState.online => 'online',
+        NodeState.offline => 'offline',
+        NodeState.unknown => 'looking…',
+      };
+
+  String _linkLabel(LinkType t) => switch (t) {
+        LinkType.ethernet => 'Ethernet',
+        LinkType.wifi => 'Wi-Fi',
+        LinkType.tailscale => 'Tailscale',
+        LinkType.tailscaleMobile => 'Tailscale · mobile data',
+        LinkType.cellular => 'Mobile data',
+        LinkType.unknown => 'unknown link',
+      };
 
   Widget _lanModelsSection(BuildContext context, LanModelShareService sharing) {
     final t = AppTokens.of(context);
@@ -641,31 +622,6 @@ class _ClusterViewState extends State<ClusterView> {
       );
     });
   }
-
-  Future<void> _scanQr() async {
-    final code = await Get.to<String>(() => const _QrScanPage());
-    if (code != null) await _report(cluster.addFromQr(code));
-  }
-
-  Future<void> _enterIp(BuildContext context) async {
-    final input = await showAppSheet<String>(
-      context,
-      title: 'Enter worker IP',
-      subtitle: 'Shown under the worker\'s QR code',
-      builder: (_) => const _WorkerIpEntrySheet(),
-    );
-    if (input != null) await _report(cluster.addManual(input));
-  }
-
-  Future<void> _report(Future<String?> adding) async {
-    final error = await adding;
-    if (error != null) {
-      showToast('Couldn\'t add worker', error, tone: ToastTone.error);
-    } else {
-      showToast('Worker added', 'Used the next time you load a GGUF model.',
-          tone: ToastTone.success);
-    }
-  }
 }
 
 class _WorkerIpEntrySheet extends StatefulWidget {
@@ -708,7 +664,7 @@ class _WorkerIpEntrySheetState extends State<_WorkerIpEntrySheet> {
 
 String _gb(num mb) => '${(mb / 1024).toStringAsFixed(1)} GB';
 
-/// How the loaded model is spread across phones: a stacked bar and legend.
+/// How the loaded model is spread across devices: a stacked bar and legend.
 class _SplitCard extends StatelessWidget {
   final List<ClusterShare> shares;
   const _SplitCard({required this.shares});
@@ -728,7 +684,7 @@ class _SplitCard extends StatelessWidget {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text('Loaded model', style: t.bodyStrong),
         const SizedBox(height: 2),
-        Text('Running on ${shares.length} phones · ${_gb(total)}',
+        Text('Running on ${shares.length} devices · ${_gb(total)}',
             style: t.caption),
         const SizedBox(height: 14),
         ClipRRect(
@@ -758,7 +714,7 @@ class _SplitCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   shares[i].isThisPhone
-                      ? '${shares[i].name} (this phone)'
+                      ? '${shares[i].name} (this device)'
                       : shares[i].name,
                   style: t.body,
                 ),
@@ -774,72 +730,6 @@ class _SplitCard extends StatelessWidget {
             ]),
           ),
       ]),
-    );
-  }
-}
-
-class _Stat extends StatelessWidget {
-  final String label;
-  final String value;
-  const _Stat({required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    final t = AppTokens.of(context);
-    return Column(children: [
-      Text(value, style: t.bodyStrong),
-      const SizedBox(height: 2),
-      Text(label, style: t.small, textAlign: TextAlign.center),
-    ]);
-  }
-}
-
-/// Live indicator for an active connection.
-class _PulsingDot extends StatefulWidget {
-  final Color color;
-  const _PulsingDot({required this.color});
-
-  @override
-  State<_PulsingDot> createState() => _PulsingDotState();
-}
-
-class _PulsingDotState extends State<_PulsingDot>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 1400))
-    ..repeat();
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: 56,
-      height: 56,
-      child: AnimatedBuilder(
-        animation: _c,
-        builder: (_, __) => Stack(alignment: Alignment.center, children: [
-          Container(
-            width: 24 + 32 * _c.value,
-            height: 24 + 32 * _c.value,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: widget.color.withValues(alpha: 0.35 * (1 - _c.value)),
-            ),
-          ),
-          Container(
-            width: 24,
-            height: 24,
-            decoration:
-                BoxDecoration(shape: BoxShape.circle, color: widget.color),
-            child: const Icon(Icons.hub_rounded, size: 14, color: Colors.white),
-          ),
-        ]),
-      ),
     );
   }
 }
@@ -880,7 +770,7 @@ class _QrScanPageState extends State<_QrScanPage> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
-        title: const Text('Scan worker QR code'),
+        title: const Text('Scan device QR code'),
       ),
       body: Stack(children: [
         MobileScanner(controller: _controller, onDetect: _onDetect),
@@ -899,7 +789,7 @@ class _QrScanPageState extends State<_QrScanPage> {
           right: 24,
           bottom: 48,
           child: Text(
-            'Point at the QR code on the worker phone',
+            'Point at the QR code on the other device',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.white, fontSize: 15),
           ),

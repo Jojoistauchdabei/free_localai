@@ -18,6 +18,7 @@ import 'core/routes.dart';
 import 'services/hive_service.dart';
 import 'services/inference_service.dart';
 import 'services/cluster_service.dart';
+import 'services/mesh_service.dart';
 import 'services/cloud_service.dart';
 import 'services/download_service.dart';
 import 'services/update_service.dart';
@@ -66,7 +67,8 @@ void main() {
     }
 
     // Initialize Hive
-    await Hive.initFlutter();
+    await Hive.initFlutter(
+        Platform.environment['PRIVATELM_DATA_DIR']);
 
     // Register global services
     await Get.putAsync(() => HiveService().init().timeout(
@@ -90,6 +92,9 @@ void main() {
 
     if (ClusterService.isSupported) Get.put(ClusterService(), permanent: true);
     Get.put(InferenceService());
+    if (MeshClusterService.isSupported) {
+      Get.put(MeshClusterService(), permanent: true);
+    }
     Get.put(CloudService());
     Get.put(DownloadService());
     Get.put(LanModelShareService(), permanent: true);
@@ -121,8 +126,10 @@ void main() {
     };
     final imageNotifications = Get.put(ImageGenerationNotificationService());
     try {
-      await imageNotifications.init();
-      await imageNotifications.configureBackgroundService();
+      await imageNotifications.init().timeout(const Duration(seconds: 5));
+      await imageNotifications
+          .configureBackgroundService()
+          .timeout(const Duration(seconds: 5));
     } catch (e) {
       appLog.error('[Notifications] Init failed', details: e);
     }
@@ -144,6 +151,22 @@ void main() {
               '[Cluster] auto-started worker from PRIVATELM_WORKER=1'))
           .catchError((e) => Get.find<AppLogService>()
               .error('[Cluster] auto worker start failed', details: e)));
+    }
+
+    // Headless mesh node for multi-instance tests: PRIVATELM_CLUSTER=1 turns
+    // the mesh on, PRIVATELM_AUTOLOAD=<path> loads a GGUF right away.
+    if (Platform.environment['PRIVATELM_CLUSTER'] == '1' &&
+        Get.isRegistered<MeshClusterService>()) {
+      unawaited(() async {
+        final mesh = Get.find<MeshClusterService>();
+        await mesh.enableCluster();
+        final autoLoad = Platform.environment['PRIVATELM_AUTOLOAD'];
+        if (autoLoad != null && autoLoad.isNotEmpty) {
+          final result = await Get.find<InferenceService>().loadModel(autoLoad);
+          Get.find<AppLogService>().info(
+              '[Mesh] autoload $autoLoad → $result');
+        }
+      }());
     }
 
     // Keep last model as a quick-load option, but do not auto-load on startup.
@@ -250,12 +273,14 @@ class PrivateLMApp extends StatelessWidget {
         themeMode: themeMode,
         initialRoute: AppRoutes.home,
         getPages: AppPages.pages,
-        builder: (ctx, child) => MediaQuery(
-          data: MediaQuery.of(ctx).copyWith(
-            textScaler: TextScaler.linear(scale),
-          ),
-          child: child!,
-        ),
+        builder: (ctx, child) {
+          return MediaQuery(
+            data: MediaQuery.of(ctx).copyWith(
+              textScaler: TextScaler.linear(scale),
+            ),
+            child: child!,
+          );
+        },
       );
     });
   }

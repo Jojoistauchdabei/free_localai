@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:get/get.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 import '../controllers/settings_controller.dart';
 import '../core/constants.dart';
@@ -16,6 +17,7 @@ class OpenAiServerService {
   bool _busy = false;
   String? _apiKey;
   void Function(String)? _onLog;
+  String? _webClientHtml;
 
   bool get isRunning => _server != null;
   String? get localUrl {
@@ -86,6 +88,14 @@ class OpenAiServerService {
       final path = request.uri.path;
       if (request.method == 'GET' && path == '/health') {
         await _json(request, {'status': 'ok'});
+        return;
+      }
+
+      // The bundled chat web client: a browser that opens the server root
+      // gets a chat UI instead of a 404. It talks to the same /v1 API.
+      if (request.method == 'GET' &&
+          (path == '/' || path == '/index.html' || path == '/web')) {
+        await _handleWebClient(request);
         return;
       }
 
@@ -173,8 +183,23 @@ class OpenAiServerService {
     });
   }
 
-  Future<void> _handleCapabilities(HttpRequest request) async {
-    final inference = Get.find<InferenceService>();
+  /// Serves the bundled chat web client at the server root. No key is
+  /// needed to load the page (it's a client, not model output); the page
+  /// itself asks for the key when the API requires one.
+  Future<void> _handleWebClient(HttpRequest request) async {
+    final html = _webClientHtml ??=
+        await rootBundle.loadString('assets/web_client.html');
+    final response = request.response;
+    _addCorsHeaders(response);
+    response.statusCode = HttpStatus.ok;
+    response.headers.contentType =
+        ContentType('text', 'html', charset: 'utf-8');
+    response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+    response.write(html);
+    await response.close();
+  }
+
+  Future<void> _handleCapabilities(HttpRequest request) async {    final inference = Get.find<InferenceService>();
     final hasModel = inference.isModelLoaded.value;
     final isLiteRt = hasModel && inference.loadedModelRuntime.value == 'litert';
     await _json(request, {

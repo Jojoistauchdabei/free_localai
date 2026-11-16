@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrivateLM Web</title>
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --panel: #131316;
+    --panel-2: #1a1a1f;
+    --hairline: rgba(255, 255, 255, 0.08);
+    --text: #ececef;
+    --muted: #9a9aa3;
+    --faint: #6b6b74;
+    --accent: #7c5cff;
+    --accent-soft: rgba(124, 92, 255, 0.16);
+    --green: #3ecf8e;
+    --orange: #e8a13c;
+    --red: #e05252;
+    --user: #2c2c34;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f5f7;
+      --panel: #ffffff;
+      --panel-2: #ececf0;
+      --hairline: rgba(0, 0, 0, 0.09);
+      --text: #17171c;
+      --muted: #63636e;
+      --faint: #9b9ba4;
+      --user: #e3e3ea;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 0.5px solid var(--hairline);
+    background: var(--panel);
+    flex: none;
+  }
+  .brand { font-weight: 700; letter-spacing: -0.3px; margin-right: 4px; }
+  .brand .tag {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 2px 6px;
+    border-radius: 6px;
+    vertical-align: 2px;
+    margin-left: 2px;
+  }
+  .modes { display: flex; gap: 4px; background: var(--panel-2); padding: 3px; border-radius: 10px; }
+  .mode {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  .mode.active { background: var(--accent); color: #fff; }
+  .spacer { flex: 1; }
+  .iconbtn {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 17px;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 8px;
+  }
+  .iconbtn:hover { background: var(--panel-2); }
+
+  #statusbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 14px;
+    font-size: 12.5px;
+    color: var(--muted);
+    border-bottom: 0.5px solid var(--hairline);
+    background: color-mix(in srgb, var(--panel) 60%, transparent);
+    flex: none;
+    min-height: 30px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+  .dot.green { background: var(--green); }
+  .dot.orange { background: var(--orange); }
+  .dot.red { background: var(--red); }
+  #status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status .progress { color: var(--accent); font-variant-numeric: tabular-nums; }
+
+  #settings {
+    padding: 12px 14px;
+    border-bottom: 0.5px solid var(--hairline);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex: none;
+  }
+  #settings[hidden] { display: none; }
+  #settings label { font-size: 12px; font-weight: 600; color: var(--muted); display: block; margin-bottom: 4px; }
+  #settings input, #settings select {
+    width: 100%;
+    font: inherit;
+    font-size: 13.5px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 0.5px solid var(--hairline);
+    border-radius: 9px;
+    padding: 8px 10px;
+    outline: none;
+  }
+  #settings input:focus, #settings select:focus { border-color: var(--accent); }
+  .hint { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
+
+  main { flex: 1; overflow-y: auto; padding: 18px 14px 8px; scroll-behavior: smooth; }
+  .empty { color: var(--faint); text-align: center; margin-top: 12vh; font-size: 14px; }
+  .msg { max-width: 760px; margin: 0 auto 14px; display: flex; gap: 10px; }
+  .msg .who {
+    flex: none;
+    width: 26px; height: 26px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+    margin-top: 2px;
+  }
+  .msg.user .who { background: var(--user); color: var(--muted); }
+  .msg.assistant .who { background: var(--accent-soft); color: var(--accent); }
+  .msg .bubble { min-width: 0; }
+  .msg.user .bubble {
+    background: var(--user);
+    border-radius: 12px;
+    padding: 9px 13px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .msg.assistant .bubble { overflow-wrap: anywhere; }
+  .msg.assistant .bubble p { margin: 0 0 8px; }
+  .msg.assistant .bubble p:last-child { margin-bottom: 0; }
+  .msg.assistant .bubble pre {
+    background: var(--panel-2);
+    border: 0.5px solid var(--hairline);
+    border-radius: 10px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    font-size: 13px;
+    margin: 8px 0;
+  }
+  .msg.assistant .bubble code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+  }
+  .msg.assistant .bubble :not(pre) > code {
+    background: var(--panel-2);
+    border: 0.5px solid var(--hairline);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+  .cursor {
+    display: inline-block;
+    width: 8px; height: 15px;
+    background: var(--accent);
+    vertical-align: -2px;
+    border-radius: 2px;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .notice {
+    max-width: 760px;
+    margin: 0 auto 14px;
+    font-size: 13px;
+    border: 0.5px solid var(--hairline);
+    border-radius: 10px;
+    padding: 9px 12px;
+    background: var(--panel);
+    color: var(--muted);
+  }
+  .notice.red { border-color: color-mix(in srgb, var(--red) 45%, transparent); color: var(--red); }
+
+  footer {
+    flex: none;
+    padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+    border-top: 0.5px solid var(--hairline);
+    background: var(--panel);
+  }
+  .composer {
+    max-width: 760px;
+    margin: 0 auto;
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+  #input {
+    flex: 1;
+    resize: none;
+    font: inherit;
+    font-size: 15px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 0.5px solid var(--hairline);
+    border-radius: 14px;
+    padding: 10px 14px;
+    max-height: 160px;
+    outline: none;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send {
+    flex: none;
+    width: 42px; height: 42px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 18px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #send:disabled { background: var(--panel-2); color: var(--faint); cursor: default; }
+  #send.stop { background: var(--red); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">PrivateLM<span class="tag">WEB</span></div>
+  <div class="modes">
+    <button class="mode active" id="mode-master" title="Chat with the model running on this server">Master</button>
+    <button class="mode" id="mode-webgpu" title="Chat with a small model running in this browser (WebGPU)">WebGPU</button>
+  </div>
+  <div class="spacer"></div>
+  <button class="iconbtn" id="gear" title="Settings">⚙</button>
+</header>
+
+<div id="statusbar">
+  <span class="dot" id="dot"></span>
+  <span id="status">Connecting…</span>
+</div>
+
+<div id="settings" hidden>
+  <div>
+    <label for="key">API key</label>
+    <input id="key" type="password" autocomplete="off" placeholder="Only needed when the server requires one">
+    <div class="hint">Sent as Authorization: Bearer &lt;key&gt;. Stored in this browser only.</div>
+  </div>
+  <div id="webgpu-settings">
+    <label for="model">WebGPU model (downloads into this browser)</label>
+    <select id="model">
+      <option value="onnx-community/Qwen2.5-0.5B-Instruct">Qwen2.5 0.5B Instruct (~350 MB)</option>
+      <option value="onnx-community/Qwen2.5-1.5B-Instruct">Qwen2.5 1.5B Instruct (~1 GB)</option>
+    </select>
+    <div class="hint" id="gpu-hint">Runs fully offline in this browser once downloaded.</div>
+  </div>
+</div>
+
+<main id="chat"></main>
+
+<footer>
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="Message…"></textarea>
+    <button id="send" title="Send">↑</button>
+  </div>
+</footer>
+
+<script type="module">
+const CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0';
+const els = {
+  dot: document.getElementById('dot'),
+  status: document.getElementById('status'),
+  chat: document.getElementById('chat'),
+  input: document.getElementById('input'),
+  send: document.getElementById('send'),
+  key: document.getElementById('key'),
+  model: document.getElementById('model'),
+  settings: document.getElementById('settings'),
+  gear: document.getElementById('gear'),
+  gpuHint: document.getElementById('gpu-hint'),
+  webgpuSettings: document.getElementById('webgpu-settings'),
+};
+document.getElementById('mode-master').onclick = () => setMode('master');
+document.getElementById('mode-webgpu').onclick = () => setMode('webgpu');
+els.gear.onclick = () => { els.settings.hidden = !els.settings.hidden; };
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('plm.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('plm.' + k, JSON.stringify(v)); } catch {} },
+};
+
+let mode = store.get('mode', 'master');
+let busy = false;
+let aborter = null;          // master mode: aborts the fetch
+let stopper = null;          // webgpu mode: InterruptableStoppingCriteria
+let pipeline = null, transformers = null, pipelineKey = '';
+
+els.key.value = store.get('key', '');
+els.key.oninput = () => { store.set('key', els.key.value); refreshMasterStatus(); };
+els.model.value = store.get('webgpuModel', 'onnx-community/Qwen2.5-0.5B-Instruct');
+els.model.onchange = () => {
+  store.set('webgpuModel', els.model.value);
+  pipeline = null; pipelineKey = '';
+  setStatus('', `WebGPU model changed to ${els.model.value.split('/').pop()}. It loads with your next message.`);
+  refreshMasterStatus();
+};
+
+function authHeaders() {
+  const key = els.key.value.trim();
+  return key ? { 'Authorization': 'Bearer ' + key } : {};
+}
+
+function setStatus(dotClass, html) {
+  els.dot.className = 'dot' + (dotClass ? ' ' + dotClass : '');
+  els.status.innerHTML = html;
+}
+
+// ── Chat history ─────────────────────────────────────────────────────────
+let history = store.get('hist.' + mode, []);
+function saveHistory() { store.set('hist.' + mode, history.slice(-50)); }
+
+function renderMarkdown(text) {
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let out = '';
+  const parts = text.split(/```/);
+  parts.forEach((part, i) => {
+    if (i % 2 === 1) { // code fence (first line may name the language)
+      out += '<pre><code>' + esc(part.replace(/^[\w-]*\n/, '')) + '</code></pre>';
+    } else {
+      out += esc(part)
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+        .replace(/\n/g, '<br>');
+    }
+  });
+  return out;
+}
+
+function addMessage(role, text) {
+  const empty = els.chat.querySelector('.empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.textContent = role === 'user' ? '🧑' : '✦';
+  div.appendChild(who);
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  if (role === 'user') bubble.textContent = text; else bubble.innerHTML = renderMarkdown(text);
+  div.appendChild(bubble);
+  els.chat.appendChild(div);
+  els.chat.scrollTop = els.chat.scrollHeight;
+  return bubble;
+}
+
+function addNotice(text, isRed) {
+  const n = document.createElement('div');
+  n.className = 'notice' + (isRed ? ' red' : '');
+  n.textContent = text;
+  els.chat.appendChild(n);
+  els.chat.scrollTop = els.chat.scrollHeight;
+}
+
+function redraw() {
+  els.chat.innerHTML = '';
+  if (!history.length) {
+    els.chat.innerHTML = `<div class="empty">${
+      mode === 'master'
+        ? 'Chatting with the model loaded on the server.<br>Open the gear to set an API key if it is required.'
+        : 'Chat with a small model running entirely in this browser (WebGPU).<br>The first message downloads it.'
+    }</div>`;
+    return;
+  }
+  for (const m of history) addMessage(m.role, m.content);
+}
+
+function renderHistory() {
+  // Send at most the recent turns; system prompt comes from the server.
+  return history.slice(-20).map(m => ({ role: m.role, content: m.content }));
+}
+
+// ── Master mode ──────────────────────────────────────────────────────────
+async function refreshMasterStatus() {
+  if (mode !== 'master') return;
+  try {
+    const res = await fetch('/v1/models', { headers: authHeaders() });
+    if (res.status === 401) {
+      setStatus('orange', 'API key required — open the gear and enter it.');
+      return;
+    }
+    const data = await res.json();
+    const ids = (data.data || []).map(m => m.id);
+    if (ids.length) {
+      setStatus('green', `Master ready · <b>${escapeHtml(ids[0])}</b> · this server computes, your browser chats`);
+    } else {
+      setStatus('orange', 'No model loaded on the server yet. Load a GGUF or LiteRT model in PrivateLM.');
+    }
+  } catch (e) {
+    setStatus('red', 'Server unreachable: ' + escapeHtml(String(e.message || e)));
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function streamMaster(onToken) {
+  aborter = new AbortController();
+  const res = await fetch('/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ stream: true, messages: renderHistory() }),
+    signal: aborter.signal,
+  });
+  if (!res.ok) {
+    let message = 'HTTP ' + res.status;
+    try { message = (await res.json()).error || message; } catch {}
+    if (res.status === 401) message = 'API key required or wrong — open the gear. (' + message + ')';
+    if (res.status === 429) message = 'The model is busy. Try again in a moment.';
+    throw new Error(message);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const event = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const line of event.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') return;
+        const chunk = JSON.parse(payload);
+        if (chunk.error) throw new Error(chunk.error.message || 'Generation was interrupted');
+        const token = chunk.choices?.[0]?.delta?.content || '';
+        if (token) onToken(token);      }
+    }
+  }
+}
+
+// ── WebGPU mode ──────────────────────────────────────────────────────────
+async function ensurePipeline(progress) {
+  const modelId = els.model.value;
+  const key = modelId;
+  if (pipeline && pipelineKey === key) return pipeline;
+  if (!transformers) {
+    setStatus('orange', 'Loading the WebGPU runtime…');
+    transformers = await import(CDN);
+    transformers.env.allowLocalModels = false;
+  }
+  const { pipeline: makePipeline, InterruptableStoppingCriteria } = transformers;
+  // navigator.gpu can exist without a usable adapter (headless shells,
+  // blocked drivers) — and a failed webgpu session would poison the module
+  // cache for the wasm retry. So probe the adapter up front.
+  let device = 'wasm';
+  try {
+    if (await navigator.gpu?.requestAdapter()) device = 'webgpu';
+  } catch {}
+  const dtype = device === 'webgpu' ? 'q4f16' : 'q4';
+  let usedDevice = device;
+  els.gpuHint.textContent = device === 'webgpu'
+    ? 'WebGPU detected — the model runs on your GPU.'
+    : 'No WebGPU here — falling back to WASM on the CPU (slower).';
+  setStatus('orange', `Downloading <b>${escapeHtml(modelId.split('/').pop())}</b> … <span class="progress"></span>`);
+  try {
+    pipeline = await makePipeline('text-generation', modelId, {
+      device,
+      dtype,
+      progress_callback: p => {
+        if (p.status === 'progress' && p.total) {
+          const pct = Math.round(p.progress || (p.loaded / p.total * 100));
+          els.status.querySelector('.progress')?.replaceChildren(document.createTextNode(pct + '%'));
+          if (progress) progress(pct);
+        }
+      },
+    });
+  } catch (e) {
+    // A browser can expose navigator.gpu but still have no usable GPU
+    // adapter (headless shells, blocked drivers). Fall back to WASM.
+    console.warn('[web-client] webgpu pipeline creation failed, falling back:', e?.message || e);
+    if (device !== 'webgpu') throw e;
+    pipeline = null;
+    els.gpuHint.textContent = 'WebGPU adapter unavailable — running on the CPU (WASM, slower).';
+    setStatus('orange', `Downloading <b>${escapeHtml(modelId.split('/').pop())}</b> (CPU mode) … <span class="progress"></span>`);
+    pipeline = await makePipeline('text-generation', modelId, {
+      device: 'wasm',
+      dtype: 'q4',
+      progress_callback: p => {
+        if (p.status === 'progress' && p.total) {
+          const pct = Math.round(p.progress || (p.loaded / p.total * 100));
+          els.status.querySelector('.progress')?.replaceChildren(document.createTextNode(pct + '%'));
+          if (progress) progress(pct);
+        }
+      },
+    });
+    usedDevice = 'wasm';
+  }
+  pipelineKey = key;
+  pipeline._device = usedDevice;
+  console.log('[web-client] pipeline ready, device =', usedDevice, 'dtype =', dtype);
+  return pipeline;
+}
+
+async function runWebGpu(onToken) {
+  try {
+    return await generateLocally(onToken);
+  } catch (e) {
+    // A browser can offer navigator.gpu yet have no usable GPU adapter
+    // (headless shells, blocked drivers). The failure only surfaces when
+    // the ONNX session is created, i.e. during the first generation —
+    // so retry once on the CPU.
+    if (pipeline && pipeline._device === 'webgpu' && !pipeline._fellBack) {
+      pipeline._fellBack = true;
+      pipeline = null; pipelineKey = '';
+      setStatus('orange', 'WebGPU unavailable — falling back to the CPU (WASM, slower)…');
+      return await generateLocally(onToken);
+    }
+    throw e;
+  }
+}
+
+async function generateLocally(onToken) {
+  await ensurePipeline();
+  const modelId = els.model.value.split('/').pop();
+  const where = pipeline._device === 'wasm' ? 'CPU (WASM)' : 'GPU (WebGPU)';
+  setStatus('green', `Web client model · <b>${escapeHtml(modelId)}</b> · computing in this browser on the ${where}`);
+  stopper = new (transformers.InterruptableStoppingCriteria || class { constructor() { this.stop = false; } interrupt() { this.stop = true; } reset() { this.stop = false; } })();
+  const streamer = new transformers.TextStreamer(pipeline.tokenizer, {
+    skip_prompt: true,
+    skip_special_tokens: true,
+    callback_function: onToken,
+  });
+  const out = await pipeline(renderHistory(), {
+    streamer,
+    max_new_tokens: 512,
+    do_sample: true,
+    temperature: 0.7,
+    top_p: 0.9,
+    stopping_criteria: stopper,
+  });
+  return out;
+}
+
+// ── Sending ──────────────────────────────────────────────────────────────
+function onToken(token, bubble, state) {
+  state.text += token;
+  bubble.innerHTML = renderMarkdown(state.text) + '<span class="cursor"></span>';
+  els.chat.scrollTop = els.chat.scrollHeight;
+}
+
+async function send() {
+  const text = els.input.value.trim();
+  if (!text || busy) return;
+  els.input.value = '';
+  autosize();
+  busy = true;
+  els.send.disabled = true;
+  els.send.textContent = '■';
+  els.send.classList.add('stop');
+  els.send.title = 'Stop';
+
+  history.push({ role: 'user', content: text });
+  addMessage('user', text);
+  const bubble = addMessage('assistant', '');
+  const state = { text: '' };
+  let failure = null;
+
+  const finish = () => {
+    history.push({ role: 'assistant', content: state.text.trim() || (failure ? '' : '…') });
+    saveHistory();
+    busy = false;
+    aborter = null; stopper = null;
+    els.send.disabled = false;
+    els.send.textContent = '↑';
+    els.send.classList.remove('stop');
+    els.send.title = 'Send';
+    if (failure) {
+      bubble.innerHTML = renderMarkdown(state.text);
+      addNotice(failure, true);
+      if (mode === 'master') refreshMasterStatus();
+      else setStatus('red', 'Generation failed: ' + escapeHtml(failure));
+    } else {
+      bubble.innerHTML = renderMarkdown(state.text.trim() || '…');
+      if (mode === 'master') refreshMasterStatus();
+    }
+  };
+
+  try {
+    if (mode === 'master') {
+      setStatus('orange', 'Generating on the master…');
+      await streamMaster(token => onToken(token, bubble, state));
+    } else {
+      await runWebGpu(token => onToken(token, bubble, state));
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      if (!state.text) state.text = '⏹ stopped';
+    } else {
+      failure = String(e.message || e);
+      console.error('generation failed:', e);
+    }
+  }
+  finish();
+}
+
+els.send.onclick = () => {
+  if (!busy) { send(); return; }
+  // Stop: abort the master request (the server notices the hangup and stops
+  // the model) or interrupt the WebGPU stream.
+  if (aborter) aborter.abort();
+  if (stopper) stopper.interrupt();
+};
+
+els.input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    send();
+  }
+});
+els.input.addEventListener('input', autosize);
+function autosize() {
+  els.input.style.height = 'auto';
+  els.input.style.height = Math.min(els.input.scrollHeight, 160) + 'px';
+}
+
+// ── Mode switching ───────────────────────────────────────────────────────
+function setMode(next) {
+  if (next === mode) return;
+  if (busy) return; // finish the current answer first
+  mode = next;
+  store.set('mode', mode);
+  document.getElementById('mode-master').classList.toggle('active', mode === 'master');
+  document.getElementById('mode-webgpu').classList.toggle('active', mode === 'webgpu');
+  els.webgpuSettings.style.display = mode === 'webgpu' ? '' : 'none';
+  history = store.get('hist.' + mode, []);
+  redraw();
+  if (mode === 'master') refreshMasterStatus();
+  else {
+    const name = els.model.value.split('/').pop();
+    setStatus(pipeline ? 'green' : '', pipeline
+      ? `WebGPU · <b>${escapeHtml(name)}</b> · computing in this browser`
+      : `WebGPU · <b>${escapeHtml(name)}</b> loads with your first message · runs on this browser's GPU`);
+  }
+  els.input.focus();
+}
+
+document.getElementById('mode-master').classList.toggle('active', mode === 'master');
+document.getElementById('mode-webgpu').classList.toggle('active', mode === 'webgpu');
+els.webgpuSettings.style.display = mode === 'webgpu' ? '' : 'none';
+history = store.get('hist.' + mode, []);
+redraw();
+refreshMasterStatus();
+if (mode === 'webgpu') {
+  const name = els.model.value.split('/').pop();
+  setStatus('', `WebGPU · <b>${escapeHtml(name)}</b> loads with your first message`);
+}
+</script>
+</body>
+</html>

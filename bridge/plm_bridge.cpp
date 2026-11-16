@@ -64,6 +64,7 @@ static std::vector<size_t> g_gpu_total;
 static std::vector<double> g_gpu_speed;
 // true when the device is an integrated GPU (its memory is system RAM).
 static std::vector<bool> g_gpu_is_igpu;
+static bool g_gpu_info_benchmarked = false;
 static std::mutex g_gpu_selection_mutex;
 static std::unordered_set<int> g_gpu_selection;
 
@@ -185,13 +186,18 @@ static double benchmark_gpu(ggml_backend_dev_t device) {
     return seconds > 0.0 ? (double)(bytes * rounds * 2) / seconds / 1e9 : 0.0;
 }
 
-static void refresh_gpu_info() {
+static void refresh_gpu_info(bool benchmark) {
     std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
+    if (!g_gpu_names.empty() &&
+        (!benchmark || g_gpu_info_benchmarked)) {
+        return;
+    }
     g_gpu_names.clear();
     g_gpu_free.clear();
     g_gpu_total.clear();
     g_gpu_speed.clear();
     g_gpu_is_igpu.clear();
+    g_gpu_info_benchmarked = false;
     for (auto device : gpu_devices()) {
         size_t free = 0;
         size_t total = 0;
@@ -203,10 +209,11 @@ static void refresh_gpu_info() {
                                                : ggml_backend_dev_name(device));
         g_gpu_free.push_back(free);
         g_gpu_total.push_back(total);
-        g_gpu_speed.push_back(benchmark_gpu(device));
+        g_gpu_speed.push_back(benchmark ? benchmark_gpu(device) : 0.0);
         g_gpu_is_igpu.push_back(ggml_backend_dev_type(device) ==
                                 GGML_BACKEND_DEVICE_TYPE_IGPU);
     }
+    g_gpu_info_benchmarked = benchmark;
 }
 
 static bool load_progress_cb(float progress, void * /*user*/) {
@@ -230,7 +237,9 @@ static void background_load(std::string model_path, int n_ctx, int n_threads,
 
     std::vector<ggml_backend_dev_t> cluster_devices;
     std::vector<float> tensor_split;
-    const auto local_gpus = gpu_devices();
+    // A mesh instance must expose only its selected local device; otherwise
+    // every instance on one host adds all GPUs to the model split.
+    const auto local_gpus = gpu_devices(/* respect_selection */ true);
     {
         std::lock_guard<std::mutex> lock(g_cluster_mutex);
         if (!g_cluster_endpoints.empty()) {
@@ -487,7 +496,10 @@ int plm_worker_start(const char *endpoint, int threads) {
     g_worker_starting = true;
     g_worker_thread =
         std::thread([endpoint = std::string(endpoint), threads]() {
-            auto devices = gpu_devices();
+            // Respect the user's GPU selection so a desktop instance can act
+            // as one specific device (e.g. only the second GPU) in a mesh of
+            // several instances on one machine.
+            auto devices = gpu_devices(/* respect_selection */ true);
             if (devices.empty()) {
                 auto cpu = ggml_backend_dev_by_type(
                     GGML_BACKEND_DEVICE_TYPE_CPU);
@@ -520,7 +532,7 @@ int plm_worker_stop() {
 }
 
 int plm_gpu_count() {
-    refresh_gpu_info();
+    refresh_gpu_info(false);
     std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
     return (int)g_gpu_names.size();
 }
@@ -534,7 +546,7 @@ void plm_set_gpu_selection(const int *indices, int count) {
 }
 
 const char *plm_gpu_name(int index) {
-    refresh_gpu_info();
+    refresh_gpu_info(false);
     std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
     return index >= 0 && (size_t)index < g_gpu_names.size()
                ? g_gpu_names[index].c_str()
@@ -542,7 +554,7 @@ const char *plm_gpu_name(int index) {
 }
 
 uint64_t plm_gpu_free_memory(int index) {
-    refresh_gpu_info();
+    refresh_gpu_info(false);
     std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
     return index >= 0 && (size_t)index < g_gpu_free.size()
                ? g_gpu_free[index]
@@ -550,7 +562,7 @@ uint64_t plm_gpu_free_memory(int index) {
 }
 
 uint64_t plm_gpu_total_memory(int index) {
-    refresh_gpu_info();
+    refresh_gpu_info(false);
     std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
     return index >= 0 && (size_t)index < g_gpu_total.size()
                ? g_gpu_total[index]
@@ -558,7 +570,7 @@ uint64_t plm_gpu_total_memory(int index) {
 }
 
 double plm_gpu_memory_speed(int index) {
-    refresh_gpu_info();
+    refresh_gpu_info(true);
     std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
     return index >= 0 && (size_t)index < g_gpu_speed.size()
                ? g_gpu_speed[index]
@@ -568,7 +580,7 @@ double plm_gpu_memory_speed(int index) {
 // 1 when the device is an integrated GPU whose memory comes out of system
 // RAM (so that RAM must be subtracted from the CPU's share), else 0.
 int plm_gpu_is_igpu(int index) {
-    refresh_gpu_info();
+    refresh_gpu_info(false);
     std::lock_guard<std::mutex> lock(g_gpu_info_mutex);
     return index >= 0 && (size_t)index < g_gpu_is_igpu.size() &&
                    g_gpu_is_igpu[index]

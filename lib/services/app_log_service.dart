@@ -1,4 +1,6 @@
+import 'dart:io' show stdout;
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:get/get.dart';
 import '../core/redact.dart';
 import 'crash_reporting_service.dart';
@@ -60,6 +62,14 @@ class AppLogService extends GetxService {
         details: detailText,
       ),
     );
+    // Mirror to stdout in debug builds so multi-instance automation can
+    // follow what each instance did (the in-memory log is per instance).
+    // dart:io stdout, NOT print: main.dart routes print() back into this
+    // service, which would recurse forever.
+    if (kDebugMode) {
+      stdout.writeln('[AppLog] $level: $message'
+          '${detailText == null ? '' : ' | $detailText'}');
+    }
     if (entries.length > 200) {
       entries.removeRange(200, entries.length);
     }

@@ -86,4 +86,5 @@ flutter:
   assets:
     - assets/
     - assets/webgpu_engine.html
+    - assets/web_client.html
     - assets/icons/

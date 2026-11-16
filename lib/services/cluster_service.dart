@@ -22,6 +22,7 @@ import '../core/ui.dart';
 import 'app_log_service.dart';
 import 'hive_service.dart';
 import 'inference_linux_engine.dart';
+import 'mesh_service.dart';
 
 /// What this phone does in a phone cluster.
 enum ClusterRole {
@@ -265,10 +266,20 @@ class ClusterService extends GetxService {
         DeviceInfoPlugin().androidInfo.then((info) => deviceName = info.model);
       } else {
         deviceName = Platform.isWindows ? 'Windows desktop' : 'Linux desktop';
-        refreshLocalGpuDevices();
-        refreshLocalCpuDevice();
-        refreshLocalMetrics();
-        unawaited(refreshCpuBenchmark());
+        // GPU/Vulkan probing is deferred until the mesh screen is opened.
+        // Some release builds take a long time to initialise the drivers.
+        final gpuEnv = Platform.environment['PRIVATELM_GPU_INDEX'];
+        final gpuIndex = int.tryParse(gpuEnv ?? '');
+        if (gpuEnv != null && (gpuIndex != null || gpuEnv == 'cpu')) {
+          unawaited(Future<void>.delayed(Duration.zero, () async {
+            await refreshLocalGpuDevices(benchmark: false);
+            for (final d in localGpuDevices.toList()) {
+              setLocalGpuSelected(d.index, d.index == gpuIndex);
+            }
+            Get.find<AppLogService>().info('[Cluster] GPU pinned to '
+                '${gpuEnv == 'cpu' ? 'CPU only' : 'index $gpuIndex'}');
+          }));
+        }
       }
       refreshWorkerStatus().then((_) {
         if (worker.value.running) _watchWorker();
@@ -281,10 +292,11 @@ class ClusterService extends GetxService {
     }
   }
 
-  Future<void> refreshLocalGpuDevices() async {
+  Future<void> refreshLocalGpuDevices({bool benchmark = true}) async {
     if (!isDesktopBridge || !LinuxLlamaEngine.bridgeAvailable) return;
     final names = LinuxLlamaEngine.gpuNames;
-    final speeds = LinuxLlamaEngine.gpuMemorySpeeds;
+    final speeds =
+        benchmark ? LinuxLlamaEngine.gpuMemorySpeeds : <double>[];
     final integrated = LinuxLlamaEngine.gpuIntegrated;
     final savedSelection =
         _hive.getSetting<List>(AppConstants.keyClusterGpuSelection);
@@ -423,9 +435,14 @@ class ClusterService extends GetxService {
     unawaited(_saveGpuSelection());
   }
 
-  Future<void> _saveGpuSelection() => _hive.setSetting(
-      AppConstants.keyClusterGpuSelection,
-      localGpuDevices.where((d) => d.selected).map((d) => d.index).toList());
+  Future<void> _saveGpuSelection() {
+    final selection =
+        localGpuDevices.where((d) => d.selected).map((d) => d.index).toList();
+    // -1 marks an explicit "no GPU" selection (CPU-only worker) so it is
+    // distinguishable from "never selected" (all GPUs) in the native bridge.
+    if (selection.isEmpty) selection.add(-1);
+    return _hive.setSetting(AppConstants.keyClusterGpuSelection, selection);
+  }
 
   @override
   void onClose() {
@@ -484,6 +501,7 @@ class ClusterService extends GetxService {
   // ── Worker ─────────────────────────────────────────────────────────────
 
   /// What the master scans to add this phone, once the worker is running.
+  /// [MeshClusterService] adds its own fields (node id + control port).
   String? get workerQrData {
     final host = wifiAddress.value;
     final status = worker.value;
@@ -495,16 +513,24 @@ class ClusterService extends GetxService {
       if (status.ramMb > 0) 'ram': '${status.ramMb}',
       if (status.bandwidth > 0) 'bw': status.bandwidth.toStringAsFixed(1),
       if (status.id != null) 'id': status.id!,
+      ...meshQrExtras,
     }).toString();
   }
+
+  /// Extra query parameters the mesh layer adds to pairing codes.
+  Map<String, String> meshQrExtras = const {};
 
   Future<void> startWorker() async {
     if (!canBeWorker) return;
     if (isDesktopBridge) {
+      final port = int.tryParse(
+              Platform.environment['PRIVATELM_WORKER_PORT'] ?? '') ??
+          50052;
       _workerRequested.value = true;
       worker.value = const ClusterWorkerStatus(state: 'starting');
       // Serve the RPC worker with the configured CPU core count too.
       await LinuxLlamaEngine.startWorker(
+          port: port,
           threads: cpuThreads.value > 0 ? cpuThreads.value : null);
       await Future.delayed(const Duration(milliseconds: 300));
       if (LinuxLlamaEngine.gpuNames.isNotEmpty) {
@@ -610,20 +636,33 @@ class ClusterService extends GetxService {
         port == null) {
       return 'That isn\'t a PrivateLM worker code';
     }
-    return _add(ClusterWorker(
+    final extras = Get.isRegistered<MeshClusterService>()
+        ? Get.find<MeshClusterService>().onPeerPaired(
+            host: host,
+            port: port,
+            peerNodeId: params['nid'],
+            peerControlPort: int.tryParse(params['cport'] ?? ''),
+            peerName: params['name'],
+          )
+        : Future.value();
+    final error = await _add(ClusterWorker(
       name: params['name'] ?? host,
       host: host,
       port: port,
       ramMb: int.tryParse(params['ram'] ?? ''),
       bandwidth: double.tryParse(params['bw'] ?? ''),
       model: params['name'],
-      id: params['id'],
+      id: params['id'] ?? params['nid'],
     ));
+    await extras;
+    return error;
   }
 
   /// Adds a worker by IP ("192.168.1.20" or "192.168.1.20:50052"). Returns
-  /// an error message, or null on success.
-  Future<String?> addManual(String input) async {
+  /// an error message, or null on success. Mesh fields ([peerNodeId] etc.)
+  /// arrive with pairing codes and the control-plane pair endpoint.
+  Future<String?> addManual(String input,
+      {String? peerNodeId, int? peerControlPort, String? peerName}) async {
     final text = input.trim();
     if (text.isEmpty) return 'Enter the worker phone\'s IP address';
     final host =
@@ -632,10 +671,21 @@ class ClusterService extends GetxService {
         ? int.tryParse(text.substring(text.lastIndexOf(':') + 1))
         : LlamaCluster.defaultPort;
     if (host.isEmpty || port == null) return 'Use the form 192.168.1.20:50052';
-    return _add(ClusterWorker(name: host, host: host, port: port));
+    final extras = Get.isRegistered<MeshClusterService>()
+        ? Get.find<MeshClusterService>().onPeerPaired(
+            host: host,
+            port: port,
+            peerNodeId: peerNodeId,
+            peerControlPort: peerControlPort,
+            peerName: peerName,
+          )
+        : Future.value();
+    final error = await _add(ClusterWorker(name: host, host: host, port: port));
+    await extras;
+    return error;
   }
 
-  Future<String?> addFound(ClusterWorker w) => _add(w);
+  Future<String?> addFound(ClusterWorker w) => addManual(w.endpoint);
 
   /// Finds saved workers that no longer answer at their address (they moved
   /// to another Wi-Fi, a hotspot, or got a new IP) by their device ID on
@@ -683,6 +733,9 @@ class ClusterService extends GetxService {
   Future<void> remove(ClusterWorker w) async {
     workers.removeWhere((s) => s.endpoint == w.endpoint);
     await _save();
+    if (Get.isRegistered<MeshClusterService>()) {
+      await Get.find<MeshClusterService>().onPeerRemoved(w.endpoint);
+    }
   }
 
   bool isAdded(ClusterWorker w) => workers.any((s) => s.endpoint == w.endpoint);
@@ -702,6 +755,9 @@ class ClusterService extends GetxService {
       isScanning.value = false;
     }
   }
+
+  /// Reachability probe other services can reuse (mesh heartbeats).
+  Future<bool> probeEndpoint(String endpoint) => _probe(endpoint);
 
   Future<bool> _probe(String endpoint) async {
     if (!isDesktopBridge) return LlamaCluster.probe(endpoint);
@@ -754,6 +810,8 @@ class ClusterService extends GetxService {
     final available = workers
         .where((w) => !offline.any((o) => o.endpoint == w.endpoint))
         .toList();
+    Get.find<AppLogService>().info('[Cluster] planning next load: '
+        '${available.length}/${workers.length} paired device(s) reachable');
     if (offline.isNotEmpty) {
       final names = offline.map((w) => w.model ?? w.name).join(', ');
       showToast('Phone cluster', 'Not reachable, loading without: $names');
@@ -769,7 +827,26 @@ class ClusterService extends GetxService {
         ? (localCpuDevice.value?.usableMemoryBytes.toDouble() ??
             _linuxAvailableRamMb())
         : await LlamaCluster.localFreeRamMb();
-    final master = _Phone(null, localRamMb * 0.7, _localSpeed!);
+    // Mesh contribution policy: a device on a slow link (e.g. Tailscale over
+    // mobile data) lends nothing while the model still fits on the other
+    // devices — it only streams from the model.
+    var localCapacityFactor = 0.7;
+    if (Get.isRegistered<MeshClusterService>()) {
+      final mesh = Get.find<MeshClusterService>();
+      if (!mesh.localPolicy.value.contributes) {
+        final othersMb = available.fold<double>(
+            0, (a, w) => a + (w.ramMb ?? 2000) * 0.75);
+        if (needMb <= othersMb) {
+          localCapacityFactor = 0.0;
+        } else {
+          Get.find<AppLogService>().info(
+              '[Mesh] The model still needs this device\'s memory despite the '
+              'slow link — contributing compute anyway');
+        }
+      }
+    }
+    final master =
+        _Phone(null, localRamMb * localCapacityFactor, _localSpeed!);
     final phones = [
       master,
       for (final w in available)
@@ -808,6 +885,9 @@ class ClusterService extends GetxService {
       await _clearCluster();
       return 0;
     }
+    _lastPlan = [
+      for (final p in used) (endpoint: p.worker!.endpoint, mb: p.assignedMb),
+    ];
     try {
       if (isDesktopBridge) {
         LinuxLlamaEngine.setCluster(
@@ -827,6 +907,9 @@ class ClusterService extends GetxService {
           '${e.message ?? 'A worker is unreachable'}. Turn on Worker on that '
           'phone, or set this phone\'s Phone cluster to Off.');
     }
+    if (localCapacityFactor == 0 && Get.isRegistered<MeshClusterService>()) {
+      Get.find<MeshClusterService>().logContributionDeferred();
+    }
     return used.length;
   }
 
@@ -840,7 +923,12 @@ class ClusterService extends GetxService {
 
   double _linuxAvailableRamMb() {
     try {
-      return LinuxLlamaEngine.freeRamBytes / (1024 * 1024);
+      // The integrated GPU's pool comes out of the same physical RAM, so
+      // only the rest is available to the CPU.
+      var bytes = LinuxLlamaEngine.freeRamBytes;
+      bytes -= LinuxLlamaEngine.integratedGpuTotalMemoryBytes;
+      if (bytes < 0) bytes = 0;
+      return bytes / (1024 * 1024);
     } catch (_) {
       return 4096;
     }
@@ -964,7 +1052,13 @@ class ClusterService extends GetxService {
   /// "Fits on this phone" sheet. True to share with workers anyway.
   Future<bool> _askFitsHere(
       String model, double modelMb, int workerCount) async {
+    // Headless (automation, no UI, e.g. PRIVATELM_CLUSTER test instances):
+    // sharing is the point of the mesh — distribute whenever workers are
+    // available.
+    if (Platform.environment['PRIVATELM_CLUSTER'] == '1') return true;
     final context = Get.context;
+    // No UI context (headless/automation): share with the workers.
+    if (context == null) return true;
     if (context == null) return false;
     final share = await showAppSheet<bool>(
       context,
@@ -998,7 +1092,30 @@ class ClusterService extends GetxService {
   /// shares come from llama.cpp's per-device weight buffers; this phone's
   /// share is the rest of the file, because its own buffers overlap (the
   /// mapped file and the CPU's repacked copy of the same weights).
+  /// The cluster plan handed to the native engine for the current load
+  /// (desktop has no per-buffer log to read back, so the plan is the source
+  /// of truth for the UI).
+  List<({String endpoint, double mb})> _lastPlan = const [];
+
   Future<void> refreshSplit(String modelPath) async {
+    final fileMb = await File(modelPath).length() / (1024 * 1024);
+    if (isDesktopBridge) {
+      // Desktop: rebuild the shares from the plan that was applied.
+      final remoteMb = _lastPlan.fold<double>(0, (a, p) => a + p.mb);
+      split.assignAll([
+        ClusterShare(deviceName.isEmpty ? 'This device' : deviceName,
+            math.max(0, fileMb - remoteMb),
+            isThisPhone: true),
+        for (final p in _lastPlan)
+          ClusterShare(
+              workers
+                      .firstWhereOrNull((w) => w.endpoint == p.endpoint)
+                      ?.model ??
+                  p.endpoint,
+              p.mb),
+      ]);
+      return;
+    }
     final buffers = await LlamaCluster.lastLoadBuffers();
     final remote = <String, double>{};
     for (final b in buffers) {
@@ -1010,7 +1127,6 @@ class ClusterService extends GetxService {
               endpoint;
       remote[name] = (remote[name] ?? 0) + b.mb;
     }
-    final fileMb = await File(modelPath).length() / (1024 * 1024);
     final remoteMb = remote.values.fold<double>(0, (a, b) => a + b);
     split.assignAll([
       ClusterShare(deviceName.isEmpty ? 'This phone' : deviceName,
@@ -1020,7 +1136,15 @@ class ClusterService extends GetxService {
     ]);
   }
 
-  void clearSplit() => split.clear();
+  void clearSplit() {
+    split.clear();
+    // The native Linux bridge keeps the RPC endpoint list independently of
+    // the UI split summary. Clear it before a rebalance so a dead worker from
+    // the previous model cannot be reused by the next load.
+    if (isDesktopBridge) {
+      LinuxLlamaEngine.setCluster(const [], const [], 1.0);
+    }
+  }
 
   static String _gb(double mb) => '${(mb / 1024).toStringAsFixed(1)} GB';
 }

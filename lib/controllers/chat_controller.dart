@@ -20,6 +20,7 @@ import '../models/chat_session.dart';
 import '../ffi/sd_ffi_bindings.dart';
 import '../services/hive_service.dart';
 import '../services/inference_service.dart';
+import '../services/mesh_service.dart';
 import '../services/cloud_service.dart';
 import '../services/local_image_service.dart';
 import '../services/app_log_service.dart';
@@ -784,26 +785,52 @@ class ChatController extends GetxController {
         } else {
           final inference = Get.find<InferenceService>();
 
-          // LiteRT models can consume image/audio attachments. GGUF currently
-          // returns a clear unsupported message from the inference layer.
+          // Mesh: when another device hosts the model (this device doesn't
+          // have one loaded), the prompt is streamed there — every node can
+          // send prompts like the master can.
+          final mesh = Get.isRegistered<MeshClusterService>()
+              ? Get.find<MeshClusterService>()
+              : null;
+          if (mesh != null &&
+              mesh.clusterEnabled.value &&
+              imagePath == null &&
+              fileType != 'audio' &&
+              mesh.chatTargetEndpoint != null) {
+            rawResponse = await mesh.generateRemote(
+              prompt: effectiveText,
+              systemPrompt: _effectiveSystemPrompt,
+              conversationHistory: history,
+              maxTokens: Get.find<SettingsController>().maxTokens.value,
+              onToken: (token) {
+                // Ignore tokens from a generation the user already stopped.
+                if (generationId != _generationSerial) return;
+                streamingResponse.value += token;
+                trackThoughtTiming();
+                _scrollToBottom();
+              },
+            );
+          } else {
+            // LiteRT models can consume image/audio attachments. GGUF currently
+            // returns a clear unsupported message from the inference layer.
 
-          rawResponse = await inference.generate(
-            prompt: effectiveText,
-            systemPrompt: _effectiveSystemPrompt,
-            conversationHistory: history,
-            source: 'chat',
-            imagePath: imagePath,
-            audioPath: fileType == 'audio' ? filePath : null,
-            stopSequences:
-                Get.find<SettingsController>().stopSequences.toList(),
-            onToken: (token) {
-              // Ignore tokens from a generation the user already stopped.
-              if (generationId != _generationSerial) return;
-              streamingResponse.value += token;
-              trackThoughtTiming();
-              _scrollToBottom();
-            },
-          );
+            rawResponse = await inference.generate(
+              prompt: effectiveText,
+              systemPrompt: _effectiveSystemPrompt,
+              conversationHistory: history,
+              source: 'chat',
+              imagePath: imagePath,
+              audioPath: fileType == 'audio' ? filePath : null,
+              stopSequences:
+                  Get.find<SettingsController>().stopSequences.toList(),
+              onToken: (token) {
+                // Ignore tokens from a generation the user already stopped.
+                if (generationId != _generationSerial) return;
+                streamingResponse.value += token;
+                trackThoughtTiming();
+                _scrollToBottom();
+              },
+            );
+          }
         }
       } else {
         final cloud = Get.find<CloudService>();

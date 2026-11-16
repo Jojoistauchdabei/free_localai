@@ -126,6 +126,9 @@ class ServerView extends GetView<ServerController> {
                     url: controller.localUrl.value == null
                         ? null
                         : controller.openAiBaseUrl),
+                _UrlRow(
+                    label: 'Web chat client (open in a browser)',
+                    url: controller.localUrl.value),
               ]),
               const SizedBox(height: 12),
               _HealthTest(baseUrl: controller.localUrl.value),

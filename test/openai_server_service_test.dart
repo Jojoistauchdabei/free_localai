@@ -8,6 +8,13 @@ import 'package:privatelm/services/inference_service.dart';
 import 'package:privatelm/services/openai_server_service_io.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  // flutter_test installs a global override that turns every HttpClient into
+  // an empty-400 mock. The suite talks to its own in-process server, so put
+  // real sockets back before anything else runs.
+  setUp(() {
+    HttpOverrides.global = null;
+  });
   late OpenAiServerService server;
   late HttpClient client;
   const port = 18765;
@@ -87,6 +94,30 @@ void main() {
     await server.start(port: port, apiKey: 'k');
     res = await send('GET', '/health');
     expect(res.headers.value('access-control-allow-origin'), '*');
+  });
+
+  test('serves the bundled web chat client at the root', () async {
+    await server.start(port: port);
+    for (final path in ['/', '/index.html', '/web']) {
+      final req = await client
+          .openUrl('GET', Uri.parse('http://127.0.0.1:$port$path'));
+      final res = await req.close();
+      final body = await res.transform(utf8.decoder).join();
+      expect(res.statusCode, 200, reason: path);
+      expect(res.headers.contentType?.mimeType, 'text/html', reason: path);
+      expect(body, contains('PrivateLM'), reason: path);
+      expect(body, contains('/v1/chat/completions'), reason: path);
+    }
+  });
+
+  test('web client page stays public while the API keeps its key', () async {
+    await server.start(port: port, apiKey: 'k');
+    final req =
+        await client.openUrl('GET', Uri.parse('http://127.0.0.1:$port/'));
+    final res = await req.close();
+    await res.drain<void>();
+    expect(res.statusCode, 200, reason: 'the page is a client, not output');
+    expect((await send('GET', '/v1/models')).statusCode, 401);
   });
 
   group('generation', () {

@@ -14,6 +14,7 @@ import '../ffi/sd_ffi_bindings.dart';
 import '../services/cluster_service.dart';
 import 'cluster_view.dart';
 import 'log_view.dart';
+import 'debug_dashboard_view.dart';
 import '../core/haptics.dart';
 
 const _tabular = [FontFeature.tabularFigures()];
@@ -143,6 +144,13 @@ class SettingsView extends GetView<SettingsController> {
                 title: 'Logs',
                 chevron: true,
                 onTap: () => Get.to(() => const LogView()),
+              ),
+              AppRow(
+                icon: Icons.dashboard_outlined,
+                title: 'Debug-Dashboard',
+                subtitle: 'Runtime-Manager: Speed, Verkehr, Hosts',
+                chevron: true,
+                onTap: () => Get.to(() => const DebugDashboardView()),
               ),
               AppRow(
                 leading: ClipRRect(

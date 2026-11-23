@@ -27,6 +27,7 @@ import 'services/app_log_service.dart';
 import 'services/crash_reporting_service.dart';
 import 'services/lan_model_share_service.dart';
 import 'services/image_generation_notification_service.dart';
+import 'services/runtimes/runtime_manager.dart';
 import 'core/constants.dart';
 
 void main() {
@@ -129,6 +130,7 @@ void main() {
     appLog.info('Notifications initialized');
     Get.put(ServerController(), permanent: true);
     Get.put(ModelController());
+    Get.put(RuntimeManager.instance);
     appLog.info('All services initialized, launching app');
 
     // Auto-configure inference settings based on device RAM

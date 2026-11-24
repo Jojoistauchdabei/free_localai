@@ -4,6 +4,7 @@ import 'engines/bitnet_cpp_engine.dart';
 import 'engines/litert_engine.dart';
 import 'engines/sd_cpp_engine.dart';
 import 'engines/exo_engine.dart';
+import 'engines/t3_code_engine.dart';
 
 class RuntimeInfo {
   final String id;
@@ -64,6 +65,7 @@ class RuntimeManager {
     LiteRtmEngine.new,
     SdCppEngine.new,
     ExoEngine.new,
+    T3CodeEngine.new,
   ];
 
   void _registerDefaults() {

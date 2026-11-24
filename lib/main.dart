@@ -19,6 +19,7 @@ import 'services/hive_service.dart';
 import 'services/inference_service.dart';
 import 'services/cluster_service.dart';
 import 'services/cloud_service.dart';
+import 'services/t3_agent_service.dart';
 import 'services/download_service.dart';
 import 'services/update_service.dart';
 import 'services/device_info_service.dart';
@@ -28,6 +29,7 @@ import 'services/crash_reporting_service.dart';
 import 'services/lan_model_share_service.dart';
 import 'services/image_generation_notification_service.dart';
 import 'services/runtimes/runtime_manager.dart';
+import 'services/t3_agent_service.dart';
 import 'core/constants.dart';
 
 void main() {
@@ -77,6 +79,7 @@ void main() {
             return HiveService();
           },
         ));
+    Get.put(T3AgentService());
     await Get.putAsync(() => DeviceInfoService().init().timeout(
           const Duration(seconds: 10),
           onTimeout: () {
@@ -92,6 +95,7 @@ void main() {
     if (ClusterService.isSupported) Get.put(ClusterService(), permanent: true);
     Get.put(InferenceService());
     Get.put(CloudService());
+    Get.put(T3AgentService());
     Get.put(DownloadService());
     Get.put(LanModelShareService(), permanent: true);
     if (UpdateService.isSupported) Get.put(UpdateService(), permanent: true);

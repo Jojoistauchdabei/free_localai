@@ -44,6 +44,14 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          channel: stable
+
+      - name: Download engine sources (llama.cpp, BitNet.cpp, stable-diffusion.cpp, exo, LiteRT)
+        run: dart tools/download_engines.dart --dest native/engines
+
       - name: Install Android SDK components
         uses: android-actions/setup-android@v3
         with:
@@ -102,6 +110,14 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          channel: stable
+
+      - name: Download engine sources (llama.cpp, BitNet.cpp, stable-diffusion.cpp, exo, LiteRT)
+        run: dart tools/download_engines.dart --dest native/engines
 
       - name: Install Linux and Vulkan dependencies
         run: |
@@ -173,6 +189,14 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+
+      - name: Set up Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          channel: stable
+
+      - name: Download engine sources (llama.cpp, BitNet.cpp, stable-diffusion.cpp, exo, LiteRT)
+        run: dart tools/download_engines.dart --dest native/engines
 
       - name: Build Windows bundle
         env:

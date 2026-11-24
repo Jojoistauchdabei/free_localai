@@ -22,6 +22,7 @@ import '../services/hive_service.dart';
 import '../services/inference_service.dart';
 import '../services/mesh_service.dart';
 import '../services/cloud_service.dart';
+import '../services/t3_agent_service.dart';
 import '../services/local_image_service.dart';
 import '../services/app_log_service.dart';
 import '../services/image_generation_notification_service.dart';
@@ -832,6 +833,17 @@ class ChatController extends GetxController {
             );
           }
         }
+      } else if (inferenceMode == 't3code') {
+        final t3 = Get.find<T3AgentService>();
+        rawResponse = await t3.sendMessage(
+          text: effectiveText,
+          onToken: (token) {
+            if (generationId != _generationSerial) return;
+            streamingResponse.value += token;
+            trackThoughtTiming();
+            _scrollToBottom();
+          },
+        );
       } else {
         final cloud = Get.find<CloudService>();
         final apiMessages = [

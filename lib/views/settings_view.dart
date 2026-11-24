@@ -14,6 +14,7 @@ import '../ffi/sd_ffi_bindings.dart';
 import '../services/cluster_service.dart';
 import 'cluster_view.dart';
 import 'log_view.dart';
+import 'debug_dashboard_view.dart';
 import '../core/haptics.dart';
 
 const _tabular = [FontFeature.tabularFigures()];
@@ -61,9 +62,11 @@ class SettingsView extends GetView<SettingsController> {
                 context,
                 icon: Icons.memory_rounded,
                 title: 'Inference mode',
-                value: controller.inferenceMode.value == 'local'
-                    ? 'Local'
-                    : 'Cloud',
+                value: switch (controller.inferenceMode.value) {
+                  'local' => 'Local',
+                  't3code' => 'T3 Code',
+                  _ => 'Cloud',
+                },
                 builder: (ctx) => _buildInferenceGroup(ctx),
               ),
               _navRow(
@@ -143,6 +146,13 @@ class SettingsView extends GetView<SettingsController> {
                 title: 'Logs',
                 chevron: true,
                 onTap: () => Get.to(() => const LogView()),
+              ),
+              AppRow(
+                icon: Icons.dashboard_outlined,
+                title: 'Debug-Dashboard',
+                subtitle: 'Runtime-Manager: Speed, Verkehr, Hosts',
+                chevron: true,
+                onTap: () => Get.to(() => const DebugDashboardView()),
               ),
               AppRow(
                 leading: ClipRRect(
@@ -232,14 +242,21 @@ class SettingsView extends GetView<SettingsController> {
         onTap: () => controller.setInferenceMode('local'),
       ),
       AppRow(
-        icon: Icons.cloud_outlined,
-        title: 'Cloud API',
-        subtitle: providerLabel(controller),
-        selected: controller.inferenceMode.value == 'cloud',
-        onTap: () => controller.setInferenceMode('cloud'),
-      ),
-    ]);
-  }
+                  icon: Icons.cloud_outlined,
+                  title: 'Cloud API',
+                  subtitle: providerLabel(controller),
+                  selected: controller.inferenceMode.value == 'cloud',
+                  onTap: () => controller.setInferenceMode('cloud'),
+                ),
+                AppRow(
+                  icon: Icons.terminal_rounded,
+                  title: 'T3 Code',
+                  subtitle: _t3CodeSubtitle(),
+                  selected: controller.inferenceMode.value == 't3code',
+                  onTap: () => controller.setInferenceMode('t3code'),
+                ),
+              ]);
+      }
 
   Widget _buildSystemPromptGroup(BuildContext context) {
     final t = AppTokens.of(context);
@@ -480,6 +497,13 @@ class SettingsView extends GetView<SettingsController> {
       return 'Active: ${localImage.loadedModelName.value}';
     }
     return 'No model loaded';
+  }
+
+  String _t3CodeSubtitle() {
+    final hive = Get.find<HiveService>();
+    final url =
+        (hive.getSetting<String>(AppConstants.keyT3ServerUrl) ?? '').trim();
+    return url;
   }
 
   Widget _buildFontSizeRow(BuildContext context) {

@@ -31,7 +31,7 @@ Future<List<String>> getDownloadedModels(String modelsDir) async {
           f.path.endsWith('.coreml') ||
           f.path.endsWith('.mlpackage') ||
           f.path.endsWith('.mlmodelc'))
-      .map((f) => f.path.split('/').last)
+      .map((f) => f.path.split(RegExp(r'[\\/]')).last)
       .toList();
 }
 

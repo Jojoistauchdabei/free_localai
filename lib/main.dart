@@ -20,6 +20,7 @@ import 'services/inference_service.dart';
 import 'services/cluster_service.dart';
 import 'services/mesh_service.dart';
 import 'services/cloud_service.dart';
+import 'services/t3_agent_service.dart';
 import 'services/download_service.dart';
 import 'services/update_service.dart';
 import 'services/device_info_service.dart';
@@ -28,6 +29,8 @@ import 'services/app_log_service.dart';
 import 'services/crash_reporting_service.dart';
 import 'services/lan_model_share_service.dart';
 import 'services/image_generation_notification_service.dart';
+import 'services/runtimes/runtime_manager.dart';
+import 'services/t3_agent_service.dart';
 import 'core/constants.dart';
 
 void main() {
@@ -78,6 +81,7 @@ void main() {
             return HiveService();
           },
         ));
+    Get.put(T3AgentService());
     await Get.putAsync(() => DeviceInfoService().init().timeout(
           const Duration(seconds: 10),
           onTimeout: () {
@@ -96,6 +100,7 @@ void main() {
       Get.put(MeshClusterService(), permanent: true);
     }
     Get.put(CloudService());
+    Get.put(T3AgentService());
     Get.put(DownloadService());
     Get.put(LanModelShareService(), permanent: true);
     if (UpdateService.isSupported) Get.put(UpdateService(), permanent: true);
@@ -136,6 +141,7 @@ void main() {
     appLog.info('Notifications initialized');
     Get.put(ServerController(), permanent: true);
     Get.put(ModelController());
+    Get.put(RuntimeManager.instance);
     appLog.info('All services initialized, launching app');
 
     // Auto-configure inference settings based on device RAM

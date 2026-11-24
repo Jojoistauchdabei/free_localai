@@ -8,7 +8,12 @@ class AppConstants {
   static const String settingsBox = 'settings';
 
   // Settings Keys
-  static const String keyInferenceMode = 'inference_mode'; // 'local' or 'cloud'
+  static const String keyInferenceMode =
+      'inference_mode'; // 'local', 'cloud' or 't3code'
+  static const String keyT3ServerUrl = 't3_server_url';
+  static const String keyT3Token = 't3_token';
+  static const String keyT3ThreadId = 't3_thread_id';
+  static const String keyT3Sequence = 't3_sequence';
   static const String keyCloudProvider =
       'cloud_provider'; // 'openai', 'anthropic', 'google', 'kimi'
   static const String keyOpenaiKey = 'openai_api_key';
